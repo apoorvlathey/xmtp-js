@@ -8,4 +8,12 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ["@xmtp/wasm-bindings"],
   },
+  build: {
+    commonjsOptions: {
+      include: [/node_modules/, /content-types/],
+    },
+  },
+  resolve: {
+    preserveSymlinks: true,
+  },
 });

@@ -1,0 +1,6 @@
+{
+  "version": 2,
+  "buildCommand": "turbo build",
+  "installCommand": "yarn install",
+  "outputDirectory": "apps/xmtp.chat/dist"
+}
