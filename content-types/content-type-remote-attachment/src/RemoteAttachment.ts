@@ -32,6 +32,7 @@ export type RemoteAttachment = {
   scheme: string;
   contentLength: number;
   filename: string;
+  text?: string;
 };
 
 export type RemoteAttachmentParameters = {
@@ -42,6 +43,7 @@ export type RemoteAttachmentParameters = {
   scheme: string;
   contentLength: string;
   filename: string;
+  text?: string;
 };
 
 export class RemoteAttachmentCodec
@@ -142,26 +144,49 @@ export class RemoteAttachmentCodec
       throw new Error("scheme must be https");
     }
 
+    const parameters: RemoteAttachmentParameters = {
+      contentDigest: content.contentDigest,
+      salt: secp.etc.bytesToHex(content.salt),
+      nonce: secp.etc.bytesToHex(content.nonce),
+      secret: secp.etc.bytesToHex(content.secret),
+      scheme: content.scheme,
+      contentLength: String(content.contentLength),
+      filename: content.filename,
+    };
+
+    // Encode the URL and text together
+    const contentData = {
+      url: content.url,
+      text: content.text || "",
+    };
+
     return {
       type: ContentTypeRemoteAttachment,
-      parameters: {
-        contentDigest: content.contentDigest,
-        salt: secp.etc.bytesToHex(content.salt),
-        nonce: secp.etc.bytesToHex(content.nonce),
-        secret: secp.etc.bytesToHex(content.secret),
-        scheme: content.scheme,
-        contentLength: String(content.contentLength),
-        filename: content.filename,
-      },
-      content: new TextEncoder().encode(content.url),
+      parameters,
+      content: new TextEncoder().encode(JSON.stringify(contentData)),
     };
   }
 
   decode(
     content: EncodedContent<RemoteAttachmentParameters>,
   ): RemoteAttachment {
+    let contentData;
+    try {
+      contentData = JSON.parse(new TextDecoder().decode(content.content));
+    } catch (e) {
+      // Fallback for old format where content was just the URL
+      contentData = {
+        url: new TextDecoder().decode(content.content),
+        text: undefined,
+      };
+    }
+
+    if (typeof contentData !== "object" || !contentData.url) {
+      throw new Error("Invalid content data format");
+    }
+
     return {
-      url: new TextDecoder().decode(content.content),
+      url: contentData.url,
       contentDigest: content.parameters.contentDigest,
       salt: secp.etc.hexToBytes(content.parameters.salt),
       nonce: secp.etc.hexToBytes(content.parameters.nonce),
@@ -169,11 +194,12 @@ export class RemoteAttachmentCodec
       scheme: content.parameters.scheme,
       contentLength: parseInt(content.parameters.contentLength, 10),
       filename: content.parameters.filename,
+      text: contentData.text || undefined,
     };
   }
 
   fallback(content: RemoteAttachment): string | undefined {
-    return `Can’t display "${content.filename}". This app doesn’t support attachments.`;
+    return content.text || undefined;
   }
 
   shouldPush() {
