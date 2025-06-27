@@ -54,7 +54,7 @@ export const useConversation = (conversation?: Conversation<ContentTypes>) => {
 
   const send = async (
     message: string,
-    options?: { content: any; contentType: ContentTypeId },
+    options?: { content: ContentTypes; contentType: ContentTypeId },
   ) => {
     if (!client) {
       return;

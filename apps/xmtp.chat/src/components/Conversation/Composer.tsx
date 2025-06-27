@@ -15,6 +15,7 @@ import {
   type RemoteAttachment,
 } from "@xmtp/content-type-remote-attachment";
 import { useEffect, useRef, useState } from "react";
+import type { ContentTypes } from "@/contexts/XMTPContext";
 import { useConversation } from "@/hooks/useConversation";
 import classes from "./Composer.module.css";
 
@@ -44,21 +45,26 @@ const generateCloudinarySignature = async (
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 };
 
-const uploadImageToCloudinary = async (
-  base64Image: string,
+const uploadEncryptedPayloadToCloudinary = async (
+  encryptedPayload: Uint8Array,
 ): Promise<UploadResponse> => {
   try {
     const timestamp = Math.round(new Date().getTime() / 1000);
     const signature = await generateCloudinarySignature(timestamp);
 
+    // Convert Uint8Array to base64
+    const base64Data = btoa(String.fromCharCode(...encryptedPayload));
+    const dataUri = `data:application/octet-stream;base64,${base64Data}`;
+
     const formData = new FormData();
-    formData.append("file", base64Image);
+    formData.append("file", dataUri);
     formData.append("api_key", CLOUDINARY_API_KEY);
     formData.append("timestamp", timestamp.toString());
     formData.append("signature", signature);
+    formData.append("resource_type", "raw"); // Important: treat as raw binary data
 
     const response = await fetch(
-      `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+      `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/raw/upload`,
       {
         method: "POST",
         body: formData,
@@ -68,7 +74,7 @@ const uploadImageToCloudinary = async (
     if (!response.ok) {
       const error = (await response.json()) as { message: string };
       throw new Error(
-        `Failed to upload image to Cloudinary: ${error.message || response.statusText}`,
+        `Failed to upload encrypted payload to Cloudinary: ${error.message || response.statusText}`,
       );
     }
 
@@ -82,51 +88,37 @@ const uploadImageToCloudinary = async (
     };
   } catch (error) {
     if (error instanceof Error) {
-      throw new Error(`Failed to upload image to Cloudinary: ${error.message}`);
+      throw new Error(
+        `Failed to upload encrypted payload to Cloudinary: ${error.message}`,
+      );
     }
     throw error;
   }
 };
 
-const uploadImageToIPFS = async (params: {
+const uploadEncryptedPayloadToIPFS = async (params: {
   pinataConfig: PinataConfig;
-  base64Image: string;
-  name?: string;
-  metadata?: Record<string, string>;
+  encryptedPayload: Uint8Array;
+  filename?: string;
 }): Promise<UploadResponse> => {
   try {
     const formData = new FormData();
 
-    // Convert base64 to Blob and then to File
-    const base64Data = params.base64Image.split(",")[1] || params.base64Image;
-    const byteCharacters = atob(base64Data);
-    const byteArrays: Uint8Array[] = [];
-
-    for (let offset = 0; offset < byteCharacters.length; offset += 1024) {
-      const slice = byteCharacters.slice(offset, offset + 1024);
-      const byteNumbers = new Array(slice.length);
-      for (let i = 0; i < slice.length; i++) {
-        byteNumbers[i] = slice.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      byteArrays.push(byteArray);
-    }
-
-    let mimeType = "image/png";
-    if (params.base64Image.startsWith("data:")) {
-      mimeType = params.base64Image.split(";")[0].split(":")[1];
-    }
-
-    const blob = new Blob(byteArrays, { type: mimeType });
-    const extension = mimeType.split("/")[1];
-    const fileName = `image.${extension}`;
-    const file = new File([blob], fileName, { type: mimeType });
+    // Create a blob from the encrypted payload
+    const blob = new Blob([params.encryptedPayload], {
+      type: "application/octet-stream",
+    });
+    const file = new File([blob], params.filename || "encrypted_attachment", {
+      type: "application/octet-stream",
+    });
 
     formData.append("file", file);
 
     const pinataMetadata = {
-      name: params.name || null,
-      keyvalues: params.metadata || {},
+      name: params.filename || "encrypted_attachment",
+      keyvalues: {
+        type: "xmtp_encrypted_attachment",
+      },
     };
     formData.append("pinataMetadata", JSON.stringify(pinataMetadata));
 
@@ -149,7 +141,7 @@ const uploadImageToIPFS = async (params: {
     if (!response.ok) {
       const error = (await response.json()) as { message: string };
       throw new Error(
-        `Failed to upload image to IPFS: ${
+        `Failed to upload encrypted payload to IPFS: ${
           error.message || response.statusText
         }`,
       );
@@ -165,14 +157,16 @@ const uploadImageToIPFS = async (params: {
     };
   } catch (error) {
     if (error instanceof Error) {
-      throw new Error(`Failed to upload image to IPFS: ${error.message}`);
+      throw new Error(
+        `Failed to upload encrypted payload to IPFS: ${error.message}`,
+      );
     }
     throw error;
   }
 };
 
 export type ComposerProps = {
-  conversation: Conversation;
+  conversation: Conversation<ContentTypes>;
 };
 
 export const Composer: React.FC<ComposerProps> = ({ conversation }) => {
@@ -219,19 +213,45 @@ export const Composer: React.FC<ComposerProps> = ({ conversation }) => {
     if (selectedFile) {
       setUploading(true);
       try {
-        // Convert file to base64
-        const reader = new FileReader();
-        const base64Promise = new Promise<string>((resolve) => {
-          reader.onload = () => {
-            const base64 = reader.result as string;
-            resolve(base64);
-          };
-        });
-        reader.readAsDataURL(selectedFile);
-        const base64Image = await base64Promise;
+        console.log("🚀 Starting attachment upload process...");
 
-        // Try Pinata first, fallback to Cloudinary
+        // Step 1: Create attachment object from file
+        const arrayBuffer = await new Promise<ArrayBuffer>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            resolve(reader.result as ArrayBuffer);
+          };
+          reader.readAsArrayBuffer(selectedFile);
+        });
+
+        const attachment = {
+          filename: selectedFile.name,
+          mimeType: selectedFile.type,
+          data: new Uint8Array(arrayBuffer),
+        };
+
+        console.log("📁 Created attachment object:", {
+          filename: attachment.filename,
+          mimeType: attachment.mimeType,
+          dataSize: attachment.data.length,
+        });
+
+        // Step 2: Encrypt the attachment
+        console.log("🔐 Encrypting attachment...");
+        const encryptedContent = await RemoteAttachmentCodec.encodeEncrypted(
+          attachment,
+          new AttachmentCodec(),
+        );
+
+        console.log("✅ Attachment encrypted:", {
+          digest: encryptedContent.digest,
+          payloadSize: encryptedContent.payload.length,
+        });
+
+        // Step 3: Upload the ENCRYPTED payload to storage
+        console.log("☁️ Uploading encrypted payload...");
         let uploadResponse: UploadResponse;
+
         try {
           if (!PINATA_JWT) {
             throw new Error("Pinata JWT not configured");
@@ -241,15 +261,16 @@ export const Composer: React.FC<ComposerProps> = ({ conversation }) => {
             jwt: PINATA_JWT,
           };
 
-          uploadResponse = await uploadImageToIPFS({
+          // Upload the encrypted payload as binary data
+          uploadResponse = await uploadEncryptedPayloadToIPFS({
             pinataConfig,
-            base64Image,
-            name: selectedFile.name,
+            encryptedPayload: encryptedContent.payload,
+            filename: `encrypted_${selectedFile.name}`,
           });
-          console.log("Successfully uploaded to IPFS");
+          console.log("✅ Successfully uploaded encrypted payload to IPFS");
         } catch (pinataError) {
           console.log(
-            "Pinata upload failed, falling back to Cloudinary:",
+            "⚠️ Pinata upload failed, falling back to Cloudinary:",
             pinataError,
           );
 
@@ -263,48 +284,35 @@ export const Composer: React.FC<ComposerProps> = ({ conversation }) => {
             );
           }
 
-          uploadResponse = await uploadImageToCloudinary(base64Image);
-          console.log("Successfully uploaded to Cloudinary");
+          uploadResponse = await uploadEncryptedPayloadToCloudinary(
+            encryptedContent.payload,
+          );
+          console.log(
+            "✅ Successfully uploaded encrypted payload to Cloudinary",
+          );
         }
 
-        // Create attachment using ArrayBuffer
-        const arrayBuffer = await new Promise<ArrayBuffer>((resolve) => {
-          reader.onload = () => {
-            resolve(reader.result as ArrayBuffer);
-          };
-          reader.readAsArrayBuffer(selectedFile);
-        });
-
-        const attachment = {
-          filename: selectedFile.name,
-          mimeType: selectedFile.type,
-          data: new Uint8Array(arrayBuffer),
-        };
-
-        // Encrypt the attachment
-        const encryptedContent = await RemoteAttachmentCodec.encodeEncrypted(
-          attachment,
-          new AttachmentCodec(),
-        );
-
-        // Create remote attachment using the upload URL
+        // Step 4: Create remote attachment with encrypted payload URL
         const remoteAttachment: RemoteAttachment = {
           url: uploadResponse.url,
           contentDigest: encryptedContent.digest,
           salt: encryptedContent.salt,
           nonce: encryptedContent.nonce,
           secret: encryptedContent.secret,
-          scheme: "https",
-          contentLength: arrayBuffer.byteLength,
-          filename: selectedFile.name,
+          scheme: "https://",
+          filename: attachment.filename,
+          contentLength: encryptedContent.payload.length, // Size of encrypted payload
         };
 
-        console.log("Sending attachment:", {
-          remoteAttachment,
-          message: message.trim(),
+        console.log("📦 Created remote attachment:", {
+          url: remoteAttachment.url,
+          filename: remoteAttachment.filename,
+          contentLength: remoteAttachment.contentLength,
+          digest: remoteAttachment.contentDigest,
         });
 
-        // Send the attachment first
+        // Step 5: Send the remote attachment
+        console.log("📤 Sending remote attachment...");
         await send("", {
           contentType: ContentTypeRemoteAttachment,
           content: remoteAttachment,
@@ -315,13 +323,14 @@ export const Composer: React.FC<ComposerProps> = ({ conversation }) => {
           await send(message.trim());
         }
 
-        console.log("Message sent");
+        console.log("✅ Message sent successfully!");
 
         setMessage("");
         setSelectedFile(null);
         setPreviewUrl(null);
+        setFileButtonKey((prev) => prev + 1); // Reset FileButton to allow same file selection
       } catch (error) {
-        console.error("Failed to upload image:", error);
+        console.error("❌ Failed to upload image:", error);
         alert("Failed to upload image. Please try again.");
       } finally {
         setUploading(false);

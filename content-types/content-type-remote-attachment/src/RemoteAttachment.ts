@@ -160,14 +160,8 @@ export class RemoteAttachmentCodec
   decode(
     content: EncodedContent<RemoteAttachmentParameters>,
   ): RemoteAttachment {
-    const url = new TextDecoder().decode(content.content);
-
-    if (!url) {
-      throw new Error("Invalid content data format");
-    }
-
     return {
-      url: url,
+      url: new TextDecoder().decode(content.content),
       contentDigest: content.parameters.contentDigest,
       salt: secp.etc.hexToBytes(content.parameters.salt),
       nonce: secp.etc.hexToBytes(content.parameters.nonce),
@@ -179,7 +173,7 @@ export class RemoteAttachmentCodec
   }
 
   fallback(content: RemoteAttachment): string | undefined {
-    return `Can't display "${content.filename}". This app doesn't support attachments.`;
+    return `Can’t display "${content.filename}". This app doesn’t support attachments.`;
   }
 
   shouldPush() {
