@@ -112,16 +112,8 @@ export const MessageContent: React.FC<MessageContentProps> = ({
 
   if (message.contentType.sameAs(ContentTypeRemoteAttachment)) {
     const attachment = message.content as RemoteAttachment;
-    console.log("Message with attachment:", {
-      message,
-      attachment,
-      contentType: message.contentType,
-      encodedContent: message.encodedContent,
-      fallback: message.fallback,
-    });
 
-    if (!attachment || !attachment.filename) {
-      console.log("Attachment validation failed:", { attachment });
+    if (!attachment.filename) {
       return (
         <MessageContentWrapper
           align={align}
@@ -148,14 +140,6 @@ export const MessageContent: React.FC<MessageContentProps> = ({
       .match(/\.(jpg|jpeg|png|gif|webp)$/);
 
     if (isImage) {
-      console.log("Rendering image attachment:", {
-        url: attachment.url,
-        filename: attachment.filename,
-        text: attachment.text,
-        textType: typeof attachment.text,
-        hasText: Boolean(attachment.text),
-        textTrimmed: attachment.text?.trim(),
-      });
       return (
         <MessageContentWrapper
           align={align}
@@ -179,18 +163,14 @@ export const MessageContent: React.FC<MessageContentProps> = ({
                 fit="contain"
                 style={{ maxWidth: "300px", maxHeight: "300px" }}
               />
-              {typeof attachment.text === "string" &&
-                attachment.text.trim() !== "" && (
-                  <Text
-                    size="sm"
-                    style={{
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-all",
-                      fontFamily: "inherit",
-                    }}>
-                    {attachment.text}
-                  </Text>
-                )}
+              <Text
+                size="xs"
+                c="gray.3"
+                style={{
+                  wordBreak: "break-all",
+                }}>
+                {attachment.filename}
+              </Text>
             </Stack>
           </Paper>
         </MessageContentWrapper>

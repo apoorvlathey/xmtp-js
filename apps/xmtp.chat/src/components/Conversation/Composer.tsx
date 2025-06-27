@@ -11,17 +11,19 @@ import {
   AttachmentCodec,
   ContentTypeRemoteAttachment,
   RemoteAttachmentCodec,
-  type Attachment,
+  // type Attachment,
   type RemoteAttachment,
 } from "@xmtp/content-type-remote-attachment";
 import { useEffect, useRef, useState } from "react";
 import { useConversation } from "@/hooks/useConversation";
 import classes from "./Composer.module.css";
 
-const PINATA_JWT = import.meta.env.VITE_PINATA_JWT;
-const CLOUDINARY_CLOUD_NAME = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME;
-const CLOUDINARY_API_KEY = import.meta.env.VITE_CLOUDINARY_API_KEY;
-const CLOUDINARY_API_SECRET = import.meta.env.VITE_CLOUDINARY_API_SECRET;
+const PINATA_JWT = import.meta.env.VITE_PINATA_JWT as string;
+const CLOUDINARY_CLOUD_NAME = import.meta.env
+  .VITE_CLOUDINARY_CLOUD_NAME as string;
+const CLOUDINARY_API_KEY = import.meta.env.VITE_CLOUDINARY_API_KEY as string;
+const CLOUDINARY_API_SECRET = import.meta.env
+  .VITE_CLOUDINARY_API_SECRET as string;
 
 type PinataConfig = {
   jwt: string;
@@ -64,13 +66,16 @@ const uploadImageToCloudinary = async (
     );
 
     if (!response.ok) {
-      const error = await response.json();
+      const error = (await response.json()) as { message: string };
       throw new Error(
         `Failed to upload image to Cloudinary: ${error.message || response.statusText}`,
       );
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as {
+      secure_url: string;
+      bytes: number;
+    };
     return {
       url: data.secure_url,
       size: data.bytes,
@@ -142,7 +147,7 @@ const uploadImageToIPFS = async (params: {
     );
 
     if (!response.ok) {
-      const error = await response.json();
+      const error = (await response.json()) as { message: string };
       throw new Error(
         `Failed to upload image to IPFS: ${
           error.message || response.statusText
@@ -150,7 +155,10 @@ const uploadImageToIPFS = async (params: {
       );
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as {
+      IpfsHash: string;
+      PinSize: number;
+    };
     return {
       url: `https://gateway.pinata.cloud/ipfs/${data.IpfsHash}`,
       size: data.PinSize,
@@ -176,7 +184,7 @@ export const Composer: React.FC<ComposerProps> = ({ conversation }) => {
   const [fileButtonKey, setFileButtonKey] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileSelect = async (file: File | null) => {
+  const handleFileSelect = (file: File | null) => {
     if (!file) return;
 
     // Check if file is an image
@@ -261,7 +269,9 @@ export const Composer: React.FC<ComposerProps> = ({ conversation }) => {
 
         // Create attachment using ArrayBuffer
         const arrayBuffer = await new Promise<ArrayBuffer>((resolve) => {
-          reader.onload = () => resolve(reader.result as ArrayBuffer);
+          reader.onload = () => {
+            resolve(reader.result as ArrayBuffer);
+          };
           reader.readAsArrayBuffer(selectedFile);
         });
 
@@ -287,7 +297,6 @@ export const Composer: React.FC<ComposerProps> = ({ conversation }) => {
           scheme: "https",
           contentLength: arrayBuffer.byteLength,
           filename: selectedFile.name,
-          text: message.trim() || undefined,
         };
 
         console.log("Sending attachment:", {
@@ -295,11 +304,16 @@ export const Composer: React.FC<ComposerProps> = ({ conversation }) => {
           message: message.trim(),
         });
 
-        // Send both attachment and text in a single message
+        // Send the attachment first
         await send("", {
           contentType: ContentTypeRemoteAttachment,
           content: remoteAttachment,
         });
+
+        // If there's a text message, send it separately
+        if (message.trim()) {
+          await send(message.trim());
+        }
 
         console.log("Message sent");
 
@@ -378,7 +392,9 @@ export const Composer: React.FC<ComposerProps> = ({ conversation }) => {
         <Group gap="xs" wrap="nowrap">
           <FileButton
             key={fileButtonKey}
-            onChange={handleFileSelect}
+            onChange={(file) => {
+              handleFileSelect(file);
+            }}
             accept="image/*">
             {(props) => (
               <Button

@@ -1,8 +1,20 @@
-# XMTP Image Attachment Implementation Report
+# XMTP Image Attachment Implementation
 
 ## Overview
 
-This report details the implementation of image attachment handling in the XMTP chat application. The implementation covers file selection, image uploading to IPFS via Pinata (with Cloudinary as fallback), encryption using XMTP's RemoteAttachmentCodec, and message rendering. Messages with both image and text are split into two separate messages, with the image being sent first followed by the text message, ensuring better compatibility and user experience.
+This document details the current implementation of image attachment handling in the XMTP chat application. The implementation follows the official XMTP RemoteAttachment specification and ensures proper separation of image and text messages for better compatibility and user experience.
+
+## Current Implementation
+
+### Message Flow
+
+The application handles image attachments using a two-message approach:
+
+1. **Image Upload & Encryption**: Images are uploaded to IPFS via Pinata (with Cloudinary fallback) and encrypted using XMTP's official RemoteAttachmentCodec
+2. **Separate Message Sending**:
+   - Image attachment is sent as the first message (ContentType: RemoteAttachment)
+   - Optional text is sent as a separate follow-up message (ContentType: Text)
+3. **Clean Display**: Each message type is displayed appropriately in the conversation
 
 ## Components
 
@@ -107,60 +119,26 @@ const uploadImageToIPFS = async (params: {
 };
 ```
 
-#### XMTP Attachment Handling & Message Sending
+#### Message Sending Implementation
 
 ```typescript
-// Create attachment
-const attachment = {
-  filename: standardizedFileName,
-  mimeType: file.type,
-  data: new Uint8Array(arrayBuffer),
-};
-
-// Encrypt attachment
-const encryptedContent = await RemoteAttachmentCodec.encodeEncrypted(
-  attachment,
-  new AttachmentCodec(),
-);
-
-// Create remote attachment
-const remoteAttachment: RemoteAttachment = {
-  url: `https://gateway.pinata.cloud/ipfs/${uploadResponse.IpfsHash}`,
-  contentDigest: encryptedContent.digest,
-  salt: encryptedContent.salt,
-  nonce: encryptedContent.nonce,
-  secret: encryptedContent.secret,
-  scheme: "https",
-  contentLength: arrayBuffer.byteLength,
-  filename: standardizedFileName,
-};
-
 // Send the attachment first
-await send(undefined, {
+await send("", {
   contentType: ContentTypeRemoteAttachment,
   content: remoteAttachment,
 });
 
-// If there's a text message, send it after the attachment
+// Then send text as separate message if provided
 if (message.trim()) {
-  await send(message);
+  await send(message.trim());
 }
 ```
 
-The implementation specifically sends the attachment first, followed by any text message. This ordering ensures:
+This approach ensures:
 
-1. Immediate visibility of image uploads
-2. Clear separation of content types
-3. Better fallback behavior in unsupported clients
-4. Consistent message ordering across different XMTP clients
-
-#### Message Flow
-
-1. User selects an image and optionally enters text
-2. Image is uploaded to IPFS and encrypted
-3. Image attachment is sent as a separate message
-4. If text was entered, it's sent as a follow-up message
-5. Messages are displayed in chronological order in the conversation
+- Clean separation of content types
+- Better compatibility with XMTP clients
+- Proper message ordering in conversations
 
 ### 2. MessageContent Component
 
@@ -173,45 +151,40 @@ Located in `apps/xmtp.chat/src/components/Messages/MessageContent.tsx`
 - Download link for non-image attachments
 - Filename display
 
-#### Image Attachment Rendering
+#### Current Display Logic
+
+Images are displayed directly from their uploaded URLs with filename labels:
 
 ```typescript
 if (message.contentType.sameAs(ContentTypeRemoteAttachment)) {
   const attachment = message.content as RemoteAttachment;
-  const isImage = attachment.filename?.toLowerCase().match(/\.(jpg|jpeg|png|gif|webp)$/);
+  const isImage = attachment.filename.toLowerCase().match(/\.(jpg|jpeg|png|gif|webp)$/);
 
   if (isImage) {
     return (
-      <Paper>
-        <Stack gap="xs">
-          <Image
-            src={attachment.url}
-            alt={attachment.filename}
-            radius="sm"
-            fit="contain"
-            style={{ maxWidth: "300px", maxHeight: "300px" }}
-          />
-          <Text size="xs" c="gray.3">
-            {attachment.filename}
-          </Text>
-        </Stack>
-      </Paper>
+      <Stack gap="xs">
+        <Image src={attachment.url} alt={attachment.filename} />
+        <Text size="xs" c="gray.3">{attachment.filename}</Text>
+      </Stack>
     );
   }
+}
 }
 ```
 
 ## Technical Specifications
 
-### RemoteAttachment Type
+### RemoteAttachment Implementation
+
+The implementation follows XMTP's official RemoteAttachment specification:
 
 ```typescript
 type RemoteAttachment = {
   url: string;
   contentDigest: string;
-  salt: string;
-  nonce: string;
-  secret: string;
+  salt: Uint8Array;
+  nonce: Uint8Array;
+  secret: Uint8Array;
   scheme: string;
   contentLength: number;
   filename: string;
@@ -225,123 +198,31 @@ type RemoteAttachment = {
 - GIF (.gif)
 - WebP (.webp)
 
-### Image Upload Services
+### Upload Strategy
 
-#### 1. Primary: IPFS via Pinata
+**Primary**: IPFS via Pinata  
+**Fallback**: Cloudinary CDN
 
-- Decentralized storage
-- Content-addressable
-- Permanent storage
-- JWT-based authentication
+Both services provide reliable image hosting with proper HTTPS URLs required by XMTP RemoteAttachment specification.
 
-#### 2. Fallback: Cloudinary
+## Configuration
 
-- Fast CDN delivery
-- Automatic optimization
-- Secure signature-based upload
-- Web Crypto API for signature generation
-
-### Upload Process
-
-```typescript
-// Cloudinary signature generation using Web Crypto API
-const generateCloudinarySignature = async (
-  timestamp: number,
-): Promise<string> => {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(`timestamp=${timestamp}${CLOUDINARY_API_SECRET}`);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
-};
-
-// Cloudinary upload function
-const uploadImageToCloudinary = async (
-  base64Image: string,
-): Promise<UploadResponse> => {
-  const timestamp = Math.round(new Date().getTime() / 1000);
-  const signature = await generateCloudinarySignature(timestamp);
-
-  const formData = new FormData();
-  formData.append("file", base64Image);
-  formData.append("api_key", CLOUDINARY_API_KEY);
-  formData.append("timestamp", timestamp.toString());
-  formData.append("signature", signature);
-
-  const response = await fetch(
-    `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
-    {
-      method: "POST",
-      body: formData,
-    },
-  );
-
-  const data = await response.json();
-  return {
-    url: data.secure_url,
-    size: data.bytes,
-  };
-};
-
-// Fallback mechanism
-try {
-  if (!PINATA_JWT) {
-    throw new Error("Pinata JWT not configured");
-  }
-  // Try IPFS upload first
-  uploadResponse = await uploadImageToIPFS({
-    /*...*/
-  });
-} catch (pinataError) {
-  // Fallback to Cloudinary if Pinata fails
-  uploadResponse = await uploadImageToCloudinary(base64Image);
-}
-```
-
-### Security Features
-
-1. Content Encryption
-
-   - Uses XMTP's RemoteAttachmentCodec for end-to-end encryption
-   - Generates unique salt, nonce, and secret for each attachment
-   - Content digest verification
-
-2. File Upload Security
-   - JWT-based authentication with Pinata
-   - Signature-based authentication with Cloudinary
-   - SHA-256 hashing using Web Crypto API
-   - HTTPS scheme enforcement
-   - Content-Type validation
-   - File size tracking
-
-## Environment Configuration
-
-Required environment variables:
+### Environment Variables
 
 - `VITE_PINATA_JWT`: Pinata API JWT for IPFS uploads
-- `VITE_CLOUDINARY_CLOUD_NAME`: Cloudinary cloud name
-- `VITE_CLOUDINARY_API_KEY`: Cloudinary API key
-- `VITE_CLOUDINARY_API_SECRET`: Cloudinary API secret
+- `VITE_CLOUDINARY_CLOUD_NAME`: Cloudinary cloud name (fallback)
+- `VITE_CLOUDINARY_API_KEY`: Cloudinary API key (fallback)
+- `VITE_CLOUDINARY_API_SECRET`: Cloudinary API secret (fallback)
 
-## Dependencies
+### Key Dependencies
 
-```json
-{
-  "@xmtp/content-type-remote-attachment": "^1.0.0",
-  "@mantine/core": "^7.0.0"
-}
-```
+- `@xmtp/content-type-remote-attachment`: Official XMTP remote attachment codec
+- `@mantine/core`: UI components for image display and file selection
 
-## Future Improvements
+## Architecture Benefits
 
-1. Progress indicators for large file uploads
-2. Retry mechanism for failed uploads
-3. File size limitations and validation
-4. Additional file type support
-5. Compression for large images
-6. Caching mechanism for downloaded attachments
-7. Batch upload support
-8. Cloudinary upload presets for automatic image optimization
-9. Image transformation parameters for different device sizes
-10. Upload progress tracking for better UX
-11. Automatic format optimization based on browser support
+- **XMTP Compliant**: Follows official RemoteAttachment specification
+- **Dual Message Flow**: Clean separation of images and text
+- **Reliable Upload**: Primary IPFS with CDN fallback
+- **End-to-End Encryption**: All attachments encrypted via XMTP codec
+- **Cross-Client Compatible**: Works with other XMTP applications
