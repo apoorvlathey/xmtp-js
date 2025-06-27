@@ -1,13 +1,4 @@
-import {
-  Box,
-  Code,
-  Flex,
-  Group,
-  Image,
-  Paper,
-  Stack,
-  Text,
-} from "@mantine/core";
+import { Code, Image, Paper, Stack, Text } from "@mantine/core";
 import type { DecodedMessage } from "@xmtp/browser-sdk";
 import {
   ContentTypeGroupUpdated,
@@ -17,6 +8,7 @@ import {
   ContentTypeRemoteAttachment,
   type RemoteAttachment,
 } from "@xmtp/content-type-remote-attachment";
+import { ContentTypeReply, type Reply } from "@xmtp/content-type-reply";
 import {
   ContentTypeTransactionReference,
   type TransactionReference,
@@ -25,54 +17,29 @@ import {
   ContentTypeWalletSendCalls,
   type WalletSendCallsParams,
 } from "@xmtp/content-type-wallet-send-calls";
-import { AddressBadge } from "@/components/AddressBadge";
-import { DateLabel } from "@/components/DateLabel";
+import { FallbackContent } from "@/components/Messages/FallbackContent";
 import { GroupUpdatedContent } from "@/components/Messages/GroupUpdatedContent";
+import {
+  MessageContentWrapper,
+  type MessageContentAlign,
+} from "@/components/Messages/MessageContentWrapper";
+import { ReplyContent } from "@/components/Messages/ReplyContent";
+import { TextContent } from "@/components/Messages/TextContent";
 import { TransactionReferenceContent } from "@/components/Messages/TransactionReferenceContent";
 import { WalletSendCallsContent } from "@/components/Messages/WalletSendCallsContent";
-import { nsToDate } from "@/helpers/date";
-import classes from "./MessageContent.module.css";
-
-type MessageAlign = "left" | "right";
-
-type MessageContentWrapperProps = React.PropsWithChildren<{
-  align: MessageAlign;
-  senderInboxId?: string;
-  sentAtNs: bigint;
-}>;
-
-const MessageContentWrapper: React.FC<MessageContentWrapperProps> = ({
-  align,
-  senderInboxId,
-  children,
-  sentAtNs,
-}) => {
-  return (
-    <Group justify={align === "left" ? "flex-start" : "flex-end"}>
-      <Stack gap="xs" align={align === "left" ? "flex-start" : "flex-end"}>
-        <Flex
-          gap="xs"
-          direction={align === "right" ? "row" : "row-reverse"}
-          align="center">
-          <DateLabel date={nsToDate(sentAtNs)} />
-          {senderInboxId && <AddressBadge address={senderInboxId} size="lg" />}
-        </Flex>
-        <Box>{children}</Box>
-      </Stack>
-    </Group>
-  );
-};
 
 export type MessageContentProps = {
-  align: MessageAlign;
+  align: MessageContentAlign;
   senderInboxId: string;
   message: DecodedMessage;
+  scrollToMessage: (id: string) => void;
 };
 
 export const MessageContent: React.FC<MessageContentProps> = ({
   message,
   align,
   senderInboxId,
+  scrollToMessage,
 }) => {
   if (message.contentType.sameAs(ContentTypeTransactionReference)) {
     return (
@@ -120,7 +87,6 @@ export const MessageContent: React.FC<MessageContentProps> = ({
           senderInboxId={senderInboxId}
           sentAtNs={message.sentAtNs}>
           <Paper
-            className={classes.text}
             onClick={(event) => {
               event.stopPropagation();
             }}
@@ -146,7 +112,6 @@ export const MessageContent: React.FC<MessageContentProps> = ({
           senderInboxId={senderInboxId}
           sentAtNs={message.sentAtNs}>
           <Paper
-            className={classes.text}
             onClick={(event) => {
               event.stopPropagation();
             }}
@@ -183,7 +148,6 @@ export const MessageContent: React.FC<MessageContentProps> = ({
         senderInboxId={senderInboxId}
         sentAtNs={message.sentAtNs}>
         <Paper
-          className={classes.text}
           onClick={(event) => {
             event.stopPropagation();
           }}
@@ -211,32 +175,39 @@ export const MessageContent: React.FC<MessageContentProps> = ({
     );
   }
 
+  if (message.contentType.sameAs(ContentTypeReply)) {
+    return (
+      <MessageContentWrapper
+        align={align}
+        senderInboxId={senderInboxId}
+        sentAtNs={message.sentAtNs}>
+        <ReplyContent
+          align={align}
+          message={message as DecodedMessage<Reply>}
+          scrollToMessage={scrollToMessage}
+        />
+      </MessageContentWrapper>
+    );
+  }
+
   if (typeof message.content === "string") {
     return (
       <MessageContentWrapper
         align={align}
         senderInboxId={senderInboxId}
         sentAtNs={message.sentAtNs}>
-        <Paper
-          className={classes.text}
-          onClick={(event) => {
-            event.stopPropagation();
-          }}
-          bg="var(--mantine-color-blue-filled)"
-          c="white"
-          py="xs"
-          px="sm"
-          radius="md">
-          <Text
-            component="pre"
-            style={{
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-              fontFamily: "inherit",
-            }}>
-            {message.content}
-          </Text>
-        </Paper>
+        <TextContent text={message.content} />
+      </MessageContentWrapper>
+    );
+  }
+
+  if (typeof message.fallback === "string") {
+    return (
+      <MessageContentWrapper
+        align={align}
+        senderInboxId={senderInboxId}
+        sentAtNs={message.sentAtNs}>
+        <FallbackContent text={message.fallback} />
       </MessageContentWrapper>
     );
   }

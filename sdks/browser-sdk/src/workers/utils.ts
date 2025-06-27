@@ -1,22 +1,27 @@
 import init, {
+  applySignatureRequest,
   generateInboxId,
   getInboxIdForIdentifier as get_inbox_id_for_identifier,
+  inboxStateFromInboxIds,
+  revokeInstallationsSignatureRequest,
   type Identifier,
 } from "@xmtp/wasm-bindings";
 import { ApiUrls } from "@/constants";
 import type {
-  UtilsEventsActions,
-  UtilsEventsClientMessageData,
-  UtilsEventsErrorData,
-  UtilsEventsWorkerPostMessageData,
-  XmtpEnv,
-} from "@/types";
+  ActionErrorData,
+  ActionName,
+  ActionWithoutResult,
+  ExtractActionWithoutData,
+} from "@/types/actions";
+import type { UtilsWorkerAction } from "@/types/actions/utils";
+import type { XmtpEnv } from "@/types/options";
+import { toSafeInboxState } from "@/utils/conversions";
 
 /**
  * Type-safe postMessage
  */
-const postMessage = <A extends UtilsEventsActions>(
-  data: UtilsEventsWorkerPostMessageData<A>,
+const postMessage = <A extends ActionName<UtilsWorkerAction>>(
+  data: ExtractActionWithoutData<UtilsWorkerAction, A>,
 ) => {
   self.postMessage(data);
 };
@@ -24,7 +29,7 @@ const postMessage = <A extends UtilsEventsActions>(
 /**
  * Type-safe postMessage for errors
  */
-const postMessageError = (data: UtilsEventsErrorData) => {
+const postMessageError = (data: ActionErrorData<UtilsWorkerAction>) => {
   self.postMessage(data);
 };
 
@@ -38,7 +43,9 @@ const getInboxIdForIdentifier = async (
 
 let enableLogging = false;
 
-self.onmessage = async (event: MessageEvent<UtilsEventsClientMessageData>) => {
+self.onmessage = async (
+  event: MessageEvent<ActionWithoutResult<UtilsWorkerAction>>,
+) => {
   const { action, id, data } = event.data;
 
   if (enableLogging) {
@@ -50,34 +57,73 @@ self.onmessage = async (event: MessageEvent<UtilsEventsClientMessageData>) => {
 
   try {
     switch (action) {
-      case "init":
+      case "utils.init": {
         enableLogging = data.enableLogging;
+        postMessage({ id, action, result: undefined });
+        break;
+      }
+      case "utils.generateInboxId": {
+        const result = generateInboxId(data.identifier);
         postMessage({
           id,
           action,
-          result: undefined,
+          result,
         });
         break;
-      case "generateInboxId":
-        postMessage({
-          id,
-          action,
-          result: generateInboxId(data.identifier),
-        });
+      }
+      case "utils.getInboxIdForIdentifier": {
+        const result = await getInboxIdForIdentifier(data.identifier, data.env);
+        postMessage({ id, action, result });
         break;
-      case "getInboxIdForIdentifier":
-        postMessage({
-          id,
-          action,
-          result: await getInboxIdForIdentifier(data.identifier, data.env),
-        });
+      }
+      case "utils.revokeInstallationsSignatureText": {
+        const host = ApiUrls[data.env ?? "dev"];
+        const signatureRequest = await revokeInstallationsSignatureRequest(
+          host,
+          data.identifier,
+          data.inboxId,
+          data.installationIds,
+        );
+        const signatureText = await signatureRequest.signatureText();
+        postMessage({ id, action, result: signatureText });
         break;
+      }
+      case "utils.revokeInstallations": {
+        const host = ApiUrls[data.env ?? "dev"];
+        const signatureRequest = await revokeInstallationsSignatureRequest(
+          host,
+          data.signer.identifier,
+          data.inboxId,
+          data.installationIds,
+        );
+        switch (data.signer.type) {
+          case "EOA":
+            await signatureRequest.addEcdsaSignature(data.signer.signature);
+            break;
+          case "SCW":
+            await signatureRequest.addScwSignature(
+              data.signer.identifier,
+              data.signer.signature,
+              data.signer.chainId,
+              data.signer.blockNumber,
+            );
+            break;
+        }
+        await applySignatureRequest(host, signatureRequest);
+        postMessage({ id, action, result: undefined });
+        break;
+      }
+      case "utils.inboxStateFromInboxIds": {
+        const host = ApiUrls[data.env ?? "dev"];
+        const inboxStates = await inboxStateFromInboxIds(host, data.inboxIds);
+        const result = inboxStates.map((inboxState) =>
+          toSafeInboxState(inboxState),
+        );
+        postMessage({ id, action, result });
+        break;
+      }
     }
   } catch (e) {
-    postMessageError({
-      id,
-      action,
-      error: e as Error,
-    });
+    postMessageError({ id, action, error: e as Error });
   }
 };

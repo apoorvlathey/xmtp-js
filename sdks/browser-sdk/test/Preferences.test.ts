@@ -9,7 +9,7 @@ import {
   sleep,
 } from "@test/helpers";
 
-describe.concurrent("Preferences", () => {
+describe("Preferences", () => {
   it("should return the correct inbox state", async () => {
     const user = createUser();
     const signer = createSigner(user);
@@ -19,9 +19,7 @@ describe.concurrent("Preferences", () => {
     expect(inboxState.installations.map((install) => install.id)).toEqual([
       client.installationId,
     ]);
-    expect(inboxState.accountIdentifiers).toEqual([
-      await signer.getIdentifier(),
-    ]);
+    expect(inboxState.identifiers).toEqual([await signer.getIdentifier()]);
     expect(inboxState.recoveryIdentifier).toEqual(await signer.getIdentifier());
 
     const user2 = createUser();
@@ -36,9 +34,7 @@ describe.concurrent("Preferences", () => {
     expect(inboxState.installations[0].bytes).toEqual(
       client.installationIdBytes,
     );
-    expect(inboxState2.accountIdentifiers).toEqual([
-      await signer.getIdentifier(),
-    ]);
+    expect(inboxState2.identifiers).toEqual([await signer.getIdentifier()]);
     expect(inboxState2.recoveryIdentifier).toEqual(
       await signer.getIdentifier(),
     );
@@ -219,7 +215,7 @@ describe.concurrent("Preferences", () => {
           expect(preferences[0].key).toBeDefined();
         }
       }
-      expect(count).toBe(3);
+      expect(count).toBe(2);
     });
   });
 });

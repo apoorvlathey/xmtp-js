@@ -1,5 +1,158 @@
 # @xmtp/node-sdk
 
+## 3.0.1
+
+### Patch Changes
+
+- 10bf2d1: Fix forks
+
+## 3.0.0
+
+This update introduces enhancements for managing installations without a client. It also contains breaking changes related to signature management and consistency across SDKs.
+
+### BREAKING CHANGES
+
+#### Debug information has been moved to `client.debugInformation`
+
+To better align with our mobile SDKs, debug information helpers are now accessible at the `debugInformation` property of client instances.
+
+Update your calls to the following:
+
+- `client.apiStatistics()` => `client.debugInformation.apiStatistics()`
+- `client.apiIdentityStatistics()` => `client.debugInformation.apiIdentityStatistics()`
+- `client.apiAggregateStatistics()` => `client.debugInformation.apiAggregateStatistics()`
+- `client.clearAllStatistics()` => `client.debugInformation.clearAllStatistics()`
+- `client.uploadDebugArchive()` => `client.debugInformation.uploadDebugArchive()`
+
+#### Signatures are now managed through signature requests
+
+This change only affects developers who are using custom workflows with the `unsafe_*SignatureText` client methods. When using a custom signing workflow, use the new `unsafe_*SignatureRequest` methods.
+
+**Example**
+
+```ts
+// change the recovery identifier
+const signatureRequest =
+  await this.unsafe_changeRecoveryIdentifierSignatureRequest(newIdentifier);
+
+await this.unsafe_addSignature(signatureRequest);
+await this.unsafe_applySignatureRequest(signatureRequest);
+```
+
+As part of this change, the `SignatureRequestType` export has been replaced with `SignatureRequestHandle`.
+
+### Other changes
+
+- Added `Client.revokeInstallations` static method for revoking installations without a client
+- Added `Client.inboxStateFromInboxIds` static method for getting inbox state without a client
+
+## 2.2.1
+
+### Patch Changes
+
+- e86b0c9: Fixed async iterator exit when calling `end()` on `AsyncStream`
+
+## 2.2.0
+
+This update introduces several targeted enhancements and clarifications related to managing client builds, network statistics, installations, and group chats.
+
+If you’ve been building on a previous release, this one should be a **drop-in replacement**. Update as soon as possible to take advantage of these enhancements and fixes.
+
+### Reset network statistics for debugging
+
+A new helper, `clearAllStatistics()`, lets you reset all API/identity/stream network statistics counters.
+
+Use it to get a clean baseline between test runs or free memory on devices where cached gRPC stats grow over time.
+
+To learn more, see [Network statistics](https://docs.xmtp.org/inboxes/debug-your-app#network-statistics).
+
+### Support installation limits and more targeted revocations
+
+XMTP now enforces up to 5 app installations per inbox ID.
+
+When the installation limit is reached, you can revoke an installation to free up a slot.
+
+To learn more, see [Revoke installations](https://docs.xmtp.org/inboxes/manage-inboxes#revoke-installations).
+
+### Support slightly larger group chats
+
+The maximum group chat size has been raised from 220 to 250 members.
+
+To learn more, see [Create a new group chat](https://docs.xmtp.org/inboxes/create-conversations#create-a-new-group-chat).
+
+### Reduced risk of group chat forks
+
+Additional safeguards have been added to minimize the chance of unintended group chat forks.
+
+To learn about what group chat forks are and how they can occur, see [MLS Group State Forks: What, Why, How](https://cryspen.com/post/mls-fork-resolution/).
+
+## 2.1.0
+
+This release delivers enhancements to messaging performance and reliability, as well as a set of developer debugging tools, all focused on making it easier to build with XMTP.
+
+If you’ve been building on a previous release, this one should be a **drop-in replacement**—just update to the latest version to take advantage of everything below.
+
+### Consent-based listing, streaming, and syncing
+
+By default, `conversations.list`, `conversations.listGroups`, `conversations.listDms`, `conversations.syncAll`, `conversations.streamAllMessages`, `conversations.streamAllGroupMessages`, and `conversations.streamAllDmMessages` now filter for conversations with a consent state of `ConsentState.Allowed` or `ConsentState.Unknown`.
+
+We recommend listing `ConsentState.Allowed` conversations only. This ensures that spammy conversations with a consent state of `ConsentState.Unknown` don't degrade the user experience.
+
+To include all conversations regardless of consent state, you can pass `[ConsentState.Allowed, ConsentState.Unknown, ConsentState.Denied]`.
+
+### Optimistic group chat creation
+
+Provides faster and offline group chat creation and message preparation before adding members.
+
+### Group chat member limit
+
+**A 220-member limit is now enforced for group chats.** This helps prevent errors that oversized groups can cause and ensures consistent behavior across clients.
+
+### Preference sync
+
+Preference syncing enables you to sync the following preference-related information across multiple existing app installations:
+
+- Conversation consent preferences
+- Conversation HMAC keys (for push notifications)
+
+### Developer tooling and debugging
+
+Delivers tools and features for debugging when building with XMTP, including group chat diagnostics, file logging, and network statistics.
+
+### Reliability and performance
+
+- Reliability improvements to message history
+- Reliability improvements to [`streamAll`](https://docs.xmtp.org/inboxes/list-and-stream#stream-all-group-chat-and-dm-messages)
+- Performance improvements to `peerInboxId`
+- [Duplicate DMs](https://docs.xmtp.org/inboxes/push-notifs/understand-push-notifs#dm-stitching-considerations-for-push-notifications) removed from streams
+
+## 2.0.9
+
+### Patch Changes
+
+- 441a029: `AsyncStream` updates
+  - Changed signature of `return` to allow no argument (e.g. `stream.return()`)
+  - Added `end` alias that calls `return` without an argument
+  - Added `AsyncStream` to exports
+
+## 2.0.8
+
+### Patch Changes
+
+- 609b509: Do not stop stream on benign message processing errors
+
+## 2.0.7
+
+### Patch Changes
+
+- 616fdec: Added `null` option to `historySyncUrl` client option to allow disabling of history sync
+
+## 2.0.6
+
+### Patch Changes
+
+- 5bc5a85: Update to the libxmtp stable release version
+
 ## 2.0.5
 
 ### Patch Changes

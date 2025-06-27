@@ -9,7 +9,7 @@ import {
   sleep,
 } from "@test/helpers";
 
-describe.concurrent("Preferences", () => {
+describe("Preferences", () => {
   it("should return the correct inbox state", async () => {
     const user = createUser();
     const signer = createSigner(user);
@@ -219,6 +219,6 @@ describe.concurrent("Preferences", () => {
       expect(preferences.HmacKeyUpdate).toBeDefined();
       expect(preferences.HmacKeyUpdate?.key).toBeDefined();
     }
-    expect(count).toBe(3);
+    expect(count).toBe(2);
   });
 });

@@ -10,7 +10,8 @@ import { Conversation } from "@/Conversation";
  *
  * This class is not intended to be initialized directly.
  */
-export class Dm extends Conversation {
+export class Dm<ContentTypes = unknown> extends Conversation<ContentTypes> {
+  #client: Client<ContentTypes>;
   #conversation: XmtpConversation;
 
   /**
@@ -21,11 +22,12 @@ export class Dm extends Conversation {
    * @param lastMessage - Optional last message in the conversation
    */
   constructor(
-    client: Client,
+    client: Client<ContentTypes>,
     conversation: XmtpConversation,
     lastMessage?: Message | null,
   ) {
     super(client, conversation, lastMessage);
+    this.#client = client;
     this.#conversation = conversation;
   }
 
@@ -36,5 +38,10 @@ export class Dm extends Conversation {
    */
   get peerInboxId() {
     return this.#conversation.dmPeerInboxId();
+  }
+
+  async getDuplicateDms() {
+    const duplicateDms = await this.#conversation.findDuplicateDms();
+    return duplicateDms.map((dm) => new Dm(this.#client, dm));
   }
 }

@@ -3,6 +3,7 @@ import process from "node:process";
 import {
   createClient as createNodeClient,
   LogLevel,
+  SyncWorkerMode,
   type Identifier,
   type LogOptions,
 } from "@xmtp/node-bindings";
@@ -29,7 +30,14 @@ export const createClient = async (
     structured: options?.structuredLogging ?? false,
     level: options?.loggingLevel ?? LogLevel.off,
   };
-  const historySyncUrl = options?.historySyncUrl || HistorySyncUrls[env];
+  const historySyncUrl =
+    options?.historySyncUrl === undefined
+      ? HistorySyncUrls[env]
+      : options.historySyncUrl;
+
+  const deviceSyncWorkerMode = options?.disableDeviceSync
+    ? SyncWorkerMode.disabled
+    : SyncWorkerMode.enabled;
 
   return createNodeClient(
     host,
@@ -39,6 +47,7 @@ export const createClient = async (
     identifier,
     options?.dbEncryptionKey,
     historySyncUrl,
+    deviceSyncWorkerMode,
     logOptions,
   );
 };

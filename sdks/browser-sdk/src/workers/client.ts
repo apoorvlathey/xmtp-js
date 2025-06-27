@@ -2,26 +2,31 @@ import init, {
   type Consent,
   type Conversation,
   type Message,
+  type SignatureRequestHandle,
   type StreamCloser,
   type UserPreference,
 } from "@xmtp/wasm-bindings";
 import type {
-  ClientEventsActions,
-  ClientEventsClientMessageData,
-  ClientEventsErrorData,
-  ClientEventsWorkerPostMessageData,
-} from "@/types";
+  ActionErrorData,
+  ActionName,
+  ActionWithoutResult,
+  ClientWorkerAction,
+  ExtractActionWithoutData,
+} from "@/types/actions";
 import type {
-  ClientStreamEventsErrorData,
-  ClientStreamEventsTypes,
-  ClientStreamEventsWorkerPostMessageData,
-} from "@/types/clientStreamEvents";
+  ExtractStreamAction,
+  StreamActionErrorData,
+  StreamActionName,
+} from "@/types/actions/streams";
 import {
   fromEncodedContent,
   fromSafeEncodedContent,
+  toSafeApiStats,
   toSafeConsent,
   toSafeConversation,
+  toSafeConversationDebugInfo,
   toSafeHmacKey,
+  toSafeIdentityStats,
   toSafeInboxState,
   toSafeKeyPackageStatus,
   toSafeMessage,
@@ -39,12 +44,18 @@ let maybeClient: WorkerClient | undefined;
 let enableLogging = false;
 
 const streamClosers = new Map<string, StreamCloser>();
+const signatureRequests = new Map<string, SignatureRequestHandle>();
+
+type SignatureRequestResult = {
+  signatureText: string;
+  signatureRequestId: string;
+};
 
 /**
  * Type-safe postMessage
  */
-const postMessage = <A extends ClientEventsActions>(
-  data: ClientEventsWorkerPostMessageData<A>,
+const postMessage = <A extends ActionName<ClientWorkerAction>>(
+  data: ExtractActionWithoutData<ClientWorkerAction, A>,
 ) => {
   self.postMessage(data);
 };
@@ -52,15 +63,15 @@ const postMessage = <A extends ClientEventsActions>(
 /**
  * Type-safe postMessage for errors
  */
-const postMessageError = (data: ClientEventsErrorData) => {
+const postMessageError = (data: ActionErrorData<ClientWorkerAction>) => {
   self.postMessage(data);
 };
 
 /**
  * Type-safe postMessage for streams
  */
-const postStreamMessage = <A extends ClientStreamEventsTypes>(
-  data: ClientStreamEventsWorkerPostMessageData<A>,
+const postStreamMessage = <A extends StreamActionName>(
+  data: ExtractStreamAction<A>,
 ) => {
   self.postMessage(data);
 };
@@ -68,11 +79,13 @@ const postStreamMessage = <A extends ClientStreamEventsTypes>(
 /**
  * Type-safe postMessage for stream errors
  */
-const postStreamMessageError = (data: ClientStreamEventsErrorData) => {
+const postStreamMessageError = (data: StreamActionErrorData) => {
   self.postMessage(data);
 };
 
-self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
+self.onmessage = async (
+  event: MessageEvent<ActionWithoutResult<ClientWorkerAction>>,
+) => {
   const { action, id, data } = event.data;
 
   if (enableLogging) {
@@ -84,7 +97,7 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
 
   try {
     // init is a special action that initializes the client
-    if (action === "init" && !maybeClient) {
+    if (action === "client.init" && !maybeClient) {
       maybeClient = await WorkerClient.create(data.identifier, data.options);
       enableLogging =
         data.options?.loggingLevel !== undefined &&
@@ -137,120 +150,175 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
       /**
        * Client actions
        */
-      case "createInboxSignatureText": {
-        const result = client.createInboxSignatureText();
-        postMessage({ id, action, result });
+      case "client.applySignatureRequest": {
+        const signatureRequest = signatureRequests.get(data.signatureRequestId);
+        if (!signatureRequest) {
+          throw new Error("Signature request not found");
+        }
+        await client.processSignatureRequest(data.signer, signatureRequest);
+        signatureRequests.delete(data.signatureRequestId);
+        postMessage({ id, action, result: undefined });
         break;
       }
-      case "addAccountSignatureText": {
-        const result = await client.addAccountSignatureText(data.newIdentifier);
-        postMessage({ id, action, result });
+      case "client.createInboxSignatureText": {
+        const result: Partial<SignatureRequestResult> = {
+          signatureText: undefined,
+          signatureRequestId: undefined,
+        };
+        try {
+          const signatureRequest = client.createInboxSignatureRequest();
+          if (signatureRequest) {
+            result.signatureText = await signatureRequest.signatureText();
+            result.signatureRequestId = data.signatureRequestId;
+            signatureRequests.set(data.signatureRequestId, signatureRequest);
+          }
+        } finally {
+          postMessage({ id, action, result });
+        }
         break;
       }
-      case "removeAccountSignatureText": {
-        const result = await client.removeAccountSignatureText(data.identifier);
-        postMessage({ id, action, result });
-        break;
-      }
-      case "revokeAllOtherInstallationsSignatureText": {
-        const result = await client.revokeAllAOtherInstallationsSignatureText();
-        postMessage({ id, action, result });
-        break;
-      }
-      case "revokeInstallationsSignatureText": {
-        const result = await client.revokeInstallationsSignatureText(
-          data.installationIds,
+      case "client.addAccountSignatureText": {
+        const signatureRequest = await client.addAccountSignatureRequest(
+          data.newIdentifier,
         );
+        const result: SignatureRequestResult = {
+          signatureText: await signatureRequest.signatureText(),
+          signatureRequestId: data.signatureRequestId,
+        };
+        signatureRequests.set(data.signatureRequestId, signatureRequest);
         postMessage({ id, action, result });
         break;
       }
-      case "changeRecoveryIdentifierSignatureText": {
-        const result = await client.changeRecoveryIdentifierSignatureText(
+      case "client.removeAccountSignatureText": {
+        const signatureRequest = await client.removeAccountSignatureRequest(
           data.identifier,
         );
+        const result: SignatureRequestResult = {
+          signatureText: await signatureRequest.signatureText(),
+          signatureRequestId: data.signatureRequestId,
+        };
+        signatureRequests.set(data.signatureRequestId, signatureRequest);
         postMessage({ id, action, result });
         break;
       }
-      case "addEcdsaSignature":
-        await client.addEcdsaSignature(data.type, data.bytes);
+      case "client.revokeAllOtherInstallationsSignatureText": {
+        const signatureRequest =
+          await client.revokeAllOtherInstallationsSignatureRequest();
+        const result: SignatureRequestResult = {
+          signatureText: await signatureRequest.signatureText(),
+          signatureRequestId: data.signatureRequestId,
+        };
+        signatureRequests.set(data.signatureRequestId, signatureRequest);
+        postMessage({ id, action, result });
+        break;
+      }
+      case "client.revokeInstallationsSignatureText": {
+        const signatureRequest =
+          await client.revokeInstallationsSignatureRequest(
+            data.installationIds,
+          );
+        const result: SignatureRequestResult = {
+          signatureText: await signatureRequest.signatureText(),
+          signatureRequestId: data.signatureRequestId,
+        };
+        signatureRequests.set(data.signatureRequestId, signatureRequest);
+        postMessage({ id, action, result });
+        break;
+      }
+      case "client.changeRecoveryIdentifierSignatureText": {
+        const signatureRequest =
+          await client.changeRecoveryIdentifierSignatureRequest(
+            data.identifier,
+          );
+        const result: SignatureRequestResult = {
+          signatureText: await signatureRequest.signatureText(),
+          signatureRequestId: data.signatureRequestId,
+        };
+        signatureRequests.set(data.signatureRequestId, signatureRequest);
+        postMessage({ id, action, result });
+        break;
+      }
+      case "client.registerIdentity": {
+        const signatureRequest = signatureRequests.get(data.signatureRequestId);
+        if (!signatureRequest) {
+          throw new Error("Signature request not found");
+        }
+        await client.registerIdentity(data.signer, signatureRequest);
+        signatureRequests.delete(data.signatureRequestId);
         postMessage({ id, action, result: undefined });
         break;
-      case "addScwSignature":
-        await client.addScwSignature(
-          data.type,
-          data.bytes,
-          data.chainId,
-          data.blockNumber,
-        );
+      }
+      case "client.addAccount": {
+        const signatureRequest = signatureRequests.get(data.signatureRequestId);
+        if (!signatureRequest) {
+          throw new Error("Signature request not found");
+        }
+        await client.processSignatureRequest(data.signer, signatureRequest);
+        signatureRequests.delete(data.signatureRequestId);
         postMessage({ id, action, result: undefined });
         break;
-      case "applySignatures":
-        await client.applySignatures();
+      }
+      case "client.removeAccount": {
+        const signatureRequest = signatureRequests.get(data.signatureRequestId);
+        if (!signatureRequest) {
+          throw new Error("Signature request not found");
+        }
+        await client.processSignatureRequest(data.signer, signatureRequest);
+        signatureRequests.delete(data.signatureRequestId);
         postMessage({ id, action, result: undefined });
         break;
-      case "registerIdentity":
-        await client.registerIdentity();
+      }
+      case "client.revokeAllOtherInstallations": {
+        const signatureRequest = signatureRequests.get(data.signatureRequestId);
+        if (!signatureRequest) {
+          throw new Error("Signature request not found");
+        }
+        await client.processSignatureRequest(data.signer, signatureRequest);
+        signatureRequests.delete(data.signatureRequestId);
         postMessage({ id, action, result: undefined });
         break;
-      case "isRegistered": {
+      }
+      case "client.revokeInstallations": {
+        const signatureRequest = signatureRequests.get(data.signatureRequestId);
+        if (!signatureRequest) {
+          throw new Error("Signature request not found");
+        }
+        await client.processSignatureRequest(data.signer, signatureRequest);
+        signatureRequests.delete(data.signatureRequestId);
+        postMessage({ id, action, result: undefined });
+        break;
+      }
+      case "client.changeRecoveryIdentifier": {
+        const signatureRequest = signatureRequests.get(data.signatureRequestId);
+        if (!signatureRequest) {
+          throw new Error("Signature request not found");
+        }
+        await client.processSignatureRequest(data.signer, signatureRequest);
+        signatureRequests.delete(data.signatureRequestId);
+        postMessage({ id, action, result: undefined });
+        break;
+      }
+      case "client.isRegistered": {
         const result = client.isRegistered;
         postMessage({ id, action, result });
         break;
       }
-      case "canMessage": {
+      case "client.canMessage": {
         const result = await client.canMessage(data.identifiers);
         postMessage({ id, action, result });
         break;
       }
-      case "inboxState": {
-        const inboxState = await client.preferences.inboxState(
-          data.refreshFromNetwork,
-        );
-        const result = toSafeInboxState(inboxState);
-        postMessage({ id, action, result });
-        break;
-      }
-      case "inboxStateFromInboxIds": {
-        const inboxStates = await client.preferences.inboxStateFromInboxIds(
-          data.inboxIds,
-          data.refreshFromNetwork,
-        );
-        const result = inboxStates.map(toSafeInboxState);
-        postMessage({ id, action, result });
-        break;
-      }
-      case "getLatestInboxState": {
-        const inboxState = await client.preferences.getLatestInboxState(
-          data.inboxId,
-        );
-        const result = toSafeInboxState(inboxState);
-        postMessage({ id, action, result });
-        break;
-      }
-      case "setConsentStates": {
-        await client.preferences.setConsentStates(data.records);
-        postMessage({ id, action, result: undefined });
-        break;
-      }
-      case "getConsentState": {
-        const result = await client.preferences.getConsentState(
-          data.entityType,
-          data.entity,
-        );
-        postMessage({ id, action, result });
-        break;
-      }
-      case "findInboxIdByIdentifier": {
+      case "client.findInboxIdByIdentifier": {
         const result = await client.findInboxIdByIdentifier(data.identifier);
         postMessage({ id, action, result });
         break;
       }
-      case "signWithInstallationKey": {
+      case "client.signWithInstallationKey": {
         const result = client.signWithInstallationKey(data.signatureText);
         postMessage({ id, action, result });
         break;
       }
-      case "verifySignedWithInstallationKey": {
+      case "client.verifySignedWithInstallationKey": {
         const result = client.verifySignedWithInstallationKey(
           data.signatureText,
           data.signatureBytes,
@@ -258,7 +326,7 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "verifySignedWithPublicKey": {
+      case "client.verifySignedWithPublicKey": {
         const result = client.verifySignedWithPublicKey(
           data.signatureText,
           data.signatureBytes,
@@ -267,7 +335,7 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "getKeyPackageStatusesForInstallationIds": {
+      case "client.getKeyPackageStatusesForInstallationIds": {
         const result = await client.getKeyPackageStatusesForInstallationIds(
           data.installationIds,
         );
@@ -285,22 +353,158 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         break;
       }
       /**
+       * Debug information actions
+       */
+      case "debugInformation.apiStatistics": {
+        const apiStats = client.debugInformation.apiStatistics();
+        const result = toSafeApiStats(apiStats);
+        postMessage({ id, action, result });
+        break;
+      }
+      case "debugInformation.apiIdentityStatistics": {
+        const apiIdentityStats =
+          client.debugInformation.apiIdentityStatistics();
+        const result = toSafeIdentityStats(apiIdentityStats);
+        postMessage({ id, action, result });
+        break;
+      }
+      case "debugInformation.apiAggregateStatistics": {
+        const result = client.debugInformation.apiAggregateStatistics();
+        postMessage({ id, action, result });
+        break;
+      }
+      case "debugInformation.clearAllStatistics": {
+        client.debugInformation.clearAllStatistics();
+        postMessage({ id, action, result: undefined });
+        break;
+      }
+      case "debugInformation.uploadDebugArchive": {
+        const result = await client.debugInformation.uploadDebugArchive(
+          data.serverUrl,
+        );
+        postMessage({ id, action, result });
+        break;
+      }
+      /**
+       * Preferences actions
+       */
+      case "preferences.inboxState": {
+        const inboxState = await client.preferences.inboxState(
+          data.refreshFromNetwork,
+        );
+        const result = toSafeInboxState(inboxState);
+        postMessage({ id, action, result });
+        break;
+      }
+      case "preferences.inboxStateFromInboxIds": {
+        const inboxStates = await client.preferences.inboxStateFromInboxIds(
+          data.inboxIds,
+          data.refreshFromNetwork,
+        );
+        const result = inboxStates.map(toSafeInboxState);
+        postMessage({ id, action, result });
+        break;
+      }
+      case "preferences.getLatestInboxState": {
+        const inboxState = await client.preferences.getLatestInboxState(
+          data.inboxId,
+        );
+        const result = toSafeInboxState(inboxState);
+        postMessage({ id, action, result });
+        break;
+      }
+      case "preferences.setConsentStates": {
+        await client.preferences.setConsentStates(data.records);
+        postMessage({ id, action, result: undefined });
+        break;
+      }
+      case "preferences.getConsentState": {
+        const result = await client.preferences.getConsentState(
+          data.entityType,
+          data.entity,
+        );
+        postMessage({ id, action, result });
+        break;
+      }
+      case "preferences.sync": {
+        const result = await client.preferences.sync();
+        postMessage({ id, action, result });
+        break;
+      }
+      case "preferences.streamConsent": {
+        const streamCallback = (
+          error: Error | null,
+          value: Consent[] | undefined,
+        ) => {
+          if (error) {
+            postStreamMessageError({
+              action: "stream.consent",
+              streamId: data.streamId,
+              error,
+            });
+          } else {
+            postStreamMessage({
+              action: "stream.consent",
+              streamId: data.streamId,
+              result: value?.map(toSafeConsent) ?? [],
+            });
+          }
+        };
+        const streamCloser = client.preferences.streamConsent(streamCallback);
+        streamClosers.set(data.streamId, streamCloser);
+        postMessage({
+          id,
+          action,
+          result: undefined,
+        });
+        break;
+      }
+      case "preferences.streamPreferences": {
+        const streamCallback = (
+          error: Error | null,
+          value: UserPreference[] | undefined,
+        ) => {
+          if (error) {
+            postStreamMessageError({
+              action: "stream.preferences",
+              streamId: data.streamId,
+              error,
+            });
+          } else {
+            postStreamMessage({
+              action: "stream.preferences",
+              streamId: data.streamId,
+              result: value ?? undefined,
+            });
+          }
+        };
+        const streamCloser =
+          client.preferences.streamPreferences(streamCallback);
+        streamClosers.set(data.streamId, streamCloser);
+        postMessage({
+          id,
+          action,
+          result: undefined,
+        });
+        break;
+      }
+      /**
        * Conversations actions
        */
-      case "streamAllGroups": {
+      case "conversations.stream": {
         const streamCallback = async (
           error: Error | null,
           value: Conversation | undefined,
         ) => {
           if (error) {
             postStreamMessageError({
-              type: "group",
+              action: "stream.conversation",
               streamId: data.streamId,
               error,
             });
           } else {
             postStreamMessage({
-              type: "group",
+              action: "stream.conversation",
               streamId: data.streamId,
               result: value
                 ? await toSafeConversation(
@@ -318,20 +522,20 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "streamAllMessages": {
+      case "conversations.streamAllMessages": {
         const streamCallback = (
           error: Error | null,
           value: Message | undefined,
         ) => {
           if (error) {
             postStreamMessageError({
-              type: "message",
+              action: "stream.message",
               streamId: data.streamId,
               error,
             });
           } else {
             postStreamMessage({
-              type: "message",
+              action: "stream.message",
               streamId: data.streamId,
               result: value ? toSafeMessage(value) : undefined,
             });
@@ -340,69 +544,13 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         const streamCloser = client.conversations.streamAllMessages(
           streamCallback,
           data.conversationType,
+          data.consentStates,
         );
         streamClosers.set(data.streamId, streamCloser);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "streamConsent": {
-        const streamCallback = (
-          error: Error | null,
-          value: Consent[] | undefined,
-        ) => {
-          if (error) {
-            postStreamMessageError({
-              type: "consent",
-              streamId: data.streamId,
-              error,
-            });
-          } else {
-            postStreamMessage({
-              type: "consent",
-              streamId: data.streamId,
-              result: value?.map(toSafeConsent) ?? [],
-            });
-          }
-        };
-        const streamCloser = client.preferences.streamConsent(streamCallback);
-        streamClosers.set(data.streamId, streamCloser);
-        postMessage({
-          id,
-          action,
-          result: undefined,
-        });
-        break;
-      }
-      case "streamPreferences": {
-        const streamCallback = (
-          error: Error | null,
-          value: UserPreference[] | undefined,
-        ) => {
-          if (error) {
-            postStreamMessageError({
-              type: "preferences",
-              streamId: data.streamId,
-              error,
-            });
-          } else {
-            postStreamMessage({
-              type: "preferences",
-              streamId: data.streamId,
-              result: value ?? undefined,
-            });
-          }
-        };
-        const streamCloser =
-          client.preferences.streamPreferences(streamCallback);
-        streamClosers.set(data.streamId, streamCloser);
-        postMessage({
-          id,
-          action,
-          result: undefined,
-        });
-        break;
-      }
-      case "getConversations": {
+      case "conversations.list": {
         const conversations = client.conversations.list(data.options);
         const result = await Promise.all(
           conversations.map((conversation) => toSafeConversation(conversation)),
@@ -410,7 +558,7 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "getGroups": {
+      case "conversations.listGroups": {
         const conversations = client.conversations.listGroups(data.options);
         const result = await Promise.all(
           conversations.map((conversation) => toSafeConversation(conversation)),
@@ -418,7 +566,7 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "getDms": {
+      case "conversations.listDms": {
         const conversations = client.conversations.listDms(data.options);
         const result = await Promise.all(
           conversations.map((conversation) => toSafeConversation(conversation)),
@@ -426,7 +574,15 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "newGroupWithIdentifiers": {
+      case "conversations.newGroupOptimistic": {
+        const conversation = client.conversations.newGroupOptimistic(
+          data.options,
+        );
+        const result = await toSafeConversation(conversation);
+        postMessage({ id, action, result });
+        break;
+      }
+      case "conversations.newGroupWithIdentifiers": {
         const conversation = await client.conversations.newGroupWithIdentifiers(
           data.identifiers,
           data.options,
@@ -435,7 +591,7 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "newGroupWithInboxIds": {
+      case "conversations.newGroup": {
         const conversation = await client.conversations.newGroup(
           data.inboxIds,
           data.options,
@@ -444,7 +600,7 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "newDmWithIdentifier": {
+      case "conversations.newDmWithIdentifier": {
         const conversation = await client.conversations.newDmWithIdentifier(
           data.identifier,
           data.options,
@@ -453,7 +609,7 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "newDmWithInboxId": {
+      case "conversations.newDm": {
         const conversation = await client.conversations.newDm(
           data.inboxId,
           data.options,
@@ -462,25 +618,17 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "syncConversations": {
+      case "conversations.sync": {
         await client.conversations.sync();
-        postMessage({
-          id,
-          action,
-          result: undefined,
-        });
+        postMessage({ id, action, result: undefined });
         break;
       }
-      case "syncAllConversations": {
+      case "conversations.syncAll": {
         await client.conversations.syncAll(data.consentStates);
-        postMessage({
-          id,
-          action,
-          result: undefined,
-        });
+        postMessage({ id, action, result: undefined });
         break;
       }
-      case "getConversationById": {
+      case "conversations.getConversationById": {
         const conversation = client.conversations.getConversationById(data.id);
         const result = conversation
           ? await toSafeConversation(conversation)
@@ -488,13 +636,13 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "getMessageById": {
+      case "conversations.getMessageById": {
         const message = client.conversations.getMessageById(data.id);
         const result = message ? toSafeMessage(message) : undefined;
         postMessage({ id, action, result });
         break;
       }
-      case "getDmByInboxId": {
+      case "conversations.getDmByInboxId": {
         const conversation = client.conversations.getDmByInboxId(data.inboxId);
         const result = conversation
           ? await toSafeConversation(conversation)
@@ -502,7 +650,7 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "getHmacKeys": {
+      case "conversations.getHmacKeys": {
         const hmacKeys = client.conversations.getHmacKeys();
         const result = Object.fromEntries(
           Array.from(hmacKeys.entries()).map(([groupId, hmacKeys]) => [
@@ -516,32 +664,44 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
       /**
        * Group actions
        */
-      case "syncGroup": {
+      case "conversation.sync": {
         const group = getGroup(data.id);
         await group.sync();
         const result = await toSafeConversation(group);
         postMessage({ id, action, result });
         break;
       }
-      case "updateGroupName": {
+      case "conversation.consentState": {
+        const group = getGroup(data.id);
+        const result = group.consentState;
+        postMessage({ id, action, result });
+        break;
+      }
+      case "conversation.updateConsentState": {
+        const group = getGroup(data.id);
+        group.updateConsentState(data.state);
+        postMessage({ id, action, result: undefined });
+        break;
+      }
+      case "group.updateName": {
         const group = getGroup(data.id);
         await group.updateName(data.name);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "updateGroupDescription": {
+      case "group.updateDescription": {
         const group = getGroup(data.id);
         await group.updateDescription(data.description);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "updateGroupImageUrlSquare": {
+      case "group.updateImageUrl": {
         const group = getGroup(data.id);
         await group.updateImageUrl(data.imageUrl);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "sendGroupMessage": {
+      case "conversation.send": {
         const group = getGroup(data.id);
         const result = await group.send(
           fromEncodedContent(fromSafeEncodedContent(data.content)),
@@ -549,7 +709,7 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "sendOptimisticGroupMessage": {
+      case "conversation.sendOptimistic": {
         const group = getGroup(data.id);
         const result = group.sendOptimistic(
           fromEncodedContent(fromSafeEncodedContent(data.content)),
@@ -557,116 +717,104 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "publishGroupMessages": {
+      case "conversation.publishMessages": {
         const group = getGroup(data.id);
         await group.publishMessages();
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "getGroupMessages": {
+      case "conversation.messages": {
         const group = getGroup(data.id);
         const messages = await group.messages(data.options);
         const result = messages.map((message) => toSafeMessage(message));
         postMessage({ id, action, result });
         break;
       }
-      case "getGroupMembers": {
+      case "conversation.members": {
         const group = getGroup(data.id);
         const result = await group.members();
         postMessage({ id, action, result });
         break;
       }
-      case "getGroupAdmins": {
+      case "group.listAdmins": {
         const group = getGroup(data.id);
         const result = group.admins;
         postMessage({ id, action, result });
         break;
       }
-      case "getGroupSuperAdmins": {
+      case "group.listSuperAdmins": {
         const group = getGroup(data.id);
         const result = group.superAdmins;
         postMessage({ id, action, result });
         break;
       }
-      case "getGroupConsentState": {
-        const group = getGroup(data.id);
-        const result = group.consentState;
-        postMessage({ id, action, result });
-        break;
-      }
-      case "updateGroupConsentState": {
-        const group = getGroup(data.id);
-        group.updateConsentState(data.state);
-        postMessage({ id, action, result: undefined });
-        break;
-      }
-      case "addGroupAdmin": {
+      case "group.addAdmin": {
         const group = getGroup(data.id);
         await group.addAdmin(data.inboxId);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "removeGroupAdmin": {
+      case "group.removeAdmin": {
         const group = getGroup(data.id);
         await group.removeAdmin(data.inboxId);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "addGroupSuperAdmin": {
+      case "group.addSuperAdmin": {
         const group = getGroup(data.id);
         await group.addSuperAdmin(data.inboxId);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "removeGroupSuperAdmin": {
+      case "group.removeSuperAdmin": {
         const group = getGroup(data.id);
         await group.removeSuperAdmin(data.inboxId);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "addGroupMembers": {
+      case "group.addMembersByIdentifiers": {
         const group = getGroup(data.id);
         await group.addMembersByIdentifiers(data.identifiers);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "removeGroupMembers": {
+      case "group.removeMembersByIdentifiers": {
         const group = getGroup(data.id);
         await group.removeMembersByIdentifiers(data.identifiers);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "addGroupMembersByInboxId": {
+      case "group.addMembers": {
         const group = getGroup(data.id);
         await group.addMembers(data.inboxIds);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "removeGroupMembersByInboxId": {
+      case "group.removeMembers": {
         const group = getGroup(data.id);
         await group.removeMembers(data.inboxIds);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "isGroupAdmin": {
+      case "group.isAdmin": {
         const group = getGroup(data.id);
         const result = group.isAdmin(data.inboxId);
         postMessage({ id, action, result });
         break;
       }
-      case "isGroupSuperAdmin": {
+      case "group.isSuperAdmin": {
         const group = getGroup(data.id);
         const result = group.isSuperAdmin(data.inboxId);
         postMessage({ id, action, result });
         break;
       }
-      case "getDmPeerInboxId": {
+      case "dm.peerInboxId": {
         const group = getGroup(data.id);
         const result = group.dmPeerInboxId();
         postMessage({ id, action, result });
         break;
       }
-      case "updateGroupPermissionPolicy": {
+      case "group.updatePermission": {
         const group = getGroup(data.id);
         await group.updatePermission(
           data.permissionType,
@@ -676,14 +824,14 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "getGroupPermissions": {
+      case "group.permissions": {
         const group = getGroup(data.id);
         const safeConversation = await toSafeConversation(group);
         const result = safeConversation.permissions;
         postMessage({ id, action, result });
         break;
       }
-      case "getGroupMessageDisappearingSettings": {
+      case "conversation.messageDisappearingSettings": {
         const group = getGroup(data.id);
         const settings = group.messageDisappearingSettings();
         const result = settings
@@ -692,25 +840,25 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result });
         break;
       }
-      case "updateGroupMessageDisappearingSettings": {
+      case "conversation.updateMessageDisappearingSettings": {
         const group = getGroup(data.id);
         await group.updateMessageDisappearingSettings(data.fromNs, data.inNs);
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "removeGroupMessageDisappearingSettings": {
+      case "conversation.removeMessageDisappearingSettings": {
         const group = getGroup(data.id);
         await group.removeMessageDisappearingSettings();
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "isGroupMessageDisappearingEnabled": {
+      case "conversation.isMessageDisappearingEnabled": {
         const group = getGroup(data.id);
         const result = group.isMessageDisappearingEnabled();
         postMessage({ id, action, result });
         break;
       }
-      case "streamGroupMessages": {
+      case "conversation.stream": {
         const group = getGroup(data.groupId);
         const streamCallback = (
           error: Error | null,
@@ -718,13 +866,13 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         ) => {
           if (error) {
             postStreamMessageError({
-              type: "message",
+              action: "stream.message",
               streamId: data.streamId,
               error,
             });
           } else {
             postStreamMessage({
-              type: "message",
+              action: "stream.message",
               streamId: data.streamId,
               result: value ? toSafeMessage(value) : undefined,
             });
@@ -735,15 +883,31 @@ self.onmessage = async (event: MessageEvent<ClientEventsClientMessageData>) => {
         postMessage({ id, action, result: undefined });
         break;
       }
-      case "getGroupPausedForVersion": {
+      case "conversation.pausedForVersion": {
         const group = getGroup(data.id);
         const result = group.pausedForVersion();
         postMessage({ id, action, result });
         break;
       }
-      case "getGroupHmacKeys": {
+      case "conversation.getHmacKeys": {
         const group = getGroup(data.id);
         const result = group.getHmacKeys();
+        postMessage({ id, action, result });
+        break;
+      }
+      case "dm.getDuplicateDms": {
+        const group = getGroup(data.id);
+        const dms = await group.getDuplicateDms();
+        const result = await Promise.all(
+          dms.map((dm) => toSafeConversation(dm)),
+        );
+        postMessage({ id, action, result });
+        break;
+      }
+      case "conversation.debugInfo": {
+        const group = getGroup(data.id);
+        const debugInfo = await group.debugInfo();
+        const result = toSafeConversationDebugInfo(debugInfo);
         postMessage({ id, action, result });
         break;
       }

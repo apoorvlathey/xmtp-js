@@ -7,15 +7,13 @@ import type {
   ContentTypeId,
 } from "@xmtp/content-type-primitives";
 import { TextCodec } from "@xmtp/content-type-text";
-import {
-  GroupMessageKind,
-  SignatureRequestType,
-  type Identifier,
-} from "@xmtp/wasm-bindings";
+import { GroupMessageKind, type Identifier } from "@xmtp/wasm-bindings";
+import { v4 } from "uuid";
 import { ClientWorkerClass } from "@/ClientWorkerClass";
 import { Conversations } from "@/Conversations";
+import { DebugInformation } from "@/DebugInformation";
 import { Preferences } from "@/Preferences";
-import type { ClientOptions, XmtpEnv } from "@/types";
+import type { ClientOptions, XmtpEnv } from "@/types/options";
 import { Utils } from "@/Utils";
 import {
   fromSafeEncodedContent,
@@ -25,25 +23,32 @@ import {
 import {
   AccountAlreadyAssociatedError,
   CodecNotFoundError,
-  GenerateSignatureError,
   InboxReassignError,
   InvalidGroupMembershipChangeError,
   SignerUnavailableError,
 } from "@/utils/errors";
-import { type Signer } from "@/utils/signer";
+import { toSafeSigner, type SafeSigner, type Signer } from "@/utils/signer";
+
+export type ExtractCodecContentTypes<C extends ContentCodec[] = []> =
+  [...C, GroupUpdatedCodec, TextCodec][number] extends ContentCodec<infer T>
+    ? T
+    : never;
 
 /**
  * Client for interacting with the XMTP network
  */
-export class Client extends ClientWorkerClass {
+export class Client<
+  ContentTypes = ExtractCodecContentTypes,
+> extends ClientWorkerClass {
   #codecs: Map<string, ContentCodec>;
-  #conversations: Conversations;
+  #conversations: Conversations<ContentTypes>;
+  #debugInformation: DebugInformation<ContentTypes>;
   #identifier?: Identifier;
   #inboxId: string | undefined;
   #installationId: string | undefined;
   #installationIdBytes: Uint8Array | undefined;
   #isReady = false;
-  #preferences: Preferences;
+  #preferences: Preferences<ContentTypes>;
   #signer?: Signer;
   #options?: ClientOptions;
 
@@ -65,6 +70,7 @@ export class Client extends ClientWorkerClass {
     );
     this.#options = options;
     this.#conversations = new Conversations(this);
+    this.#debugInformation = new DebugInformation(this);
     this.#preferences = new Preferences(this);
     const codecs = [
       new GroupUpdatedCodec(),
@@ -85,7 +91,7 @@ export class Client extends ClientWorkerClass {
    * @param identifier - The identifier to initialize the client with
    */
   async init(identifier: Identifier) {
-    const result = await this.sendMessage("init", {
+    const result = await this.sendMessage("client.init", {
       identifier,
       options: this.#options,
     });
@@ -103,8 +109,13 @@ export class Client extends ClientWorkerClass {
    * @param options - Optional configuration for the client
    * @returns A new client instance
    */
-  static async create(signer: Signer, options?: ClientOptions) {
-    const client = new Client(options);
+  static async create<ContentCodecs extends ContentCodec[] = []>(
+    signer: Signer,
+    options?: Omit<ClientOptions, "codecs"> & {
+      codecs?: ContentCodecs;
+    },
+  ) {
+    const client = new Client<ExtractCodecContentTypes<ContentCodecs>>(options);
     client.#signer = signer;
 
     await client.init(await signer.getIdentifier());
@@ -126,8 +137,13 @@ export class Client extends ClientWorkerClass {
    * @param options - Optional configuration for the client
    * @returns A new client instance
    */
-  static async build(identifier: Identifier, options?: ClientOptions) {
-    const client = new Client({
+  static async build<ContentCodecs extends ContentCodec[] = []>(
+    identifier: Identifier,
+    options?: Omit<ClientOptions, "codecs"> & {
+      codecs?: ContentCodecs;
+    },
+  ) {
+    const client = new Client<ExtractCodecContentTypes<ContentCodecs>>({
       ...options,
       disableAutoRegister: true,
     });
@@ -192,6 +208,13 @@ export class Client extends ClientWorkerClass {
   }
 
   /**
+   * Gets the debug information helpers for this client
+   */
+  get debugInformation() {
+    return this.#debugInformation;
+  }
+
+  /**
    * Gets the preferences manager for this client
    */
   get preferences() {
@@ -207,10 +230,12 @@ export class Client extends ClientWorkerClass {
    *
    * It is highly recommended to use the `register` method instead.
    *
-   * @returns The signature text
+   * @returns The signature text and signature request ID
    */
   async unsafe_createInboxSignatureText() {
-    return this.sendMessage("createInboxSignatureText", undefined);
+    return this.sendMessage("client.createInboxSignatureText", {
+      signatureRequestId: v4(),
+    });
   }
 
   /**
@@ -224,7 +249,8 @@ export class Client extends ClientWorkerClass {
    *
    * @param newIdentifier - The identifier of the new account
    * @param allowInboxReassign - Whether to allow inbox reassignment
-   * @returns The signature text
+   * @throws {InboxReassignError} if `allowInboxReassign` is false
+   * @returns The signature text and signature request ID
    */
   async unsafe_addAccountSignatureText(
     newIdentifier: Identifier,
@@ -234,8 +260,9 @@ export class Client extends ClientWorkerClass {
       throw new InboxReassignError();
     }
 
-    return this.sendMessage("addAccountSignatureText", {
+    return this.sendMessage("client.addAccountSignatureText", {
       newIdentifier,
+      signatureRequestId: v4(),
     });
   }
 
@@ -249,11 +276,12 @@ export class Client extends ClientWorkerClass {
    * It is highly recommended to use the `removeAccount` method instead.
    *
    * @param identifier - The identifier of the account to remove
-   * @returns The signature text
+   * @returns The signature text and signature request ID
    */
   async unsafe_removeAccountSignatureText(identifier: Identifier) {
-    return this.sendMessage("removeAccountSignatureText", {
+    return this.sendMessage("client.removeAccountSignatureText", {
       identifier,
+      signatureRequestId: v4(),
     });
   }
 
@@ -267,13 +295,12 @@ export class Client extends ClientWorkerClass {
    *
    * It is highly recommended to use the `revokeAllOtherInstallations` method instead.
    *
-   * @returns The signature text
+   * @returns The signature text and signature request ID
    */
   async unsafe_revokeAllOtherInstallationsSignatureText() {
-    return this.sendMessage(
-      "revokeAllOtherInstallationsSignatureText",
-      undefined,
-    );
+    return this.sendMessage("client.revokeAllOtherInstallationsSignatureText", {
+      signatureRequestId: v4(),
+    });
   }
 
   /**
@@ -287,11 +314,12 @@ export class Client extends ClientWorkerClass {
    * It is highly recommended to use the `revokeInstallations` method instead.
    *
    * @param installationIds - The installation IDs to revoke
-   * @returns The signature text
+   * @returns The signature text and signature request ID
    */
   async unsafe_revokeInstallationsSignatureText(installationIds: Uint8Array[]) {
-    return this.sendMessage("revokeInstallationsSignatureText", {
+    return this.sendMessage("client.revokeInstallationsSignatureText", {
       installationIds,
+      signatureRequestId: v4(),
     });
   }
 
@@ -306,68 +334,37 @@ export class Client extends ClientWorkerClass {
    * It is highly recommended to use the `changeRecoveryIdentifier` method instead.
    *
    * @param identifier - The new recovery identifier
-   * @returns The signature text
+   * @returns The signature text and signature request ID
    */
   async unsafe_changeRecoveryIdentifierSignatureText(identifier: Identifier) {
-    return this.sendMessage("changeRecoveryIdentifierSignatureText", {
+    return this.sendMessage("client.changeRecoveryIdentifierSignatureText", {
       identifier,
+      signatureRequestId: v4(),
     });
   }
 
   /**
-   * Adds a signature for a specific request type
+   * Applies a signature request to the client
    *
    * WARNING: This function should be used with caution. It is only provided
    * for use in special cases where the provided workflows do not meet the
    * requirements of an application.
    *
    * It is highly recommended to use the `register`, `unsafe_addAccount`,
-   * `removeAccount`, `revokeAllOtherInstallations`, or `revokeInstallations`
-   * methods instead.
+   * `removeAccount`, `revokeAllOtherInstallations`, `revokeInstallations`,
+   * or `changeRecoveryIdentifier` method instead.
    *
-   * @param signatureType - The type of signature request
-   * @param signatureText - The text to sign
    * @param signer - The signer to use
-   * @warning This is an unsafe operation and should be used with caution
+   * @param signatureRequestId - The ID of the signature request to apply
    */
-  async unsafe_addSignature(
-    signatureType: SignatureRequestType,
-    signatureText: string,
-    signer: Signer,
+  async unsafe_applySignatureRequest(
+    signer: SafeSigner,
+    signatureRequestId: string,
   ) {
-    const signature = await signer.signMessage(signatureText);
-
-    switch (signer.type) {
-      case "SCW":
-        await this.sendMessage("addScwSignature", {
-          type: signatureType,
-          bytes: signature,
-          chainId: signer.getChainId(),
-          blockNumber: signer.getBlockNumber?.(),
-        });
-        break;
-      case "EOA":
-        await this.sendMessage("addEcdsaSignature", {
-          type: signatureType,
-          bytes: signature,
-        });
-        break;
-    }
-  }
-
-  /**
-   * Applies all pending signatures
-   *
-   * WARNING: This function should be used with caution. It is only provided
-   * for use in special cases where the provided workflows do not meet the
-   * requirements of an application.
-   *
-   * It is highly recommended to use the `register`, `unsafe_addAccount`,
-   * `removeAccount`, `revokeAllOtherInstallations`, or `revokeInstallations`
-   * methods instead.
-   */
-  async unsafe_applySignatures() {
-    return this.sendMessage("applySignatures", undefined);
+    return this.sendMessage("client.applySignatureRequest", {
+      signer,
+      signatureRequestId,
+    });
   }
 
   /**
@@ -382,20 +379,21 @@ export class Client extends ClientWorkerClass {
       throw new SignerUnavailableError();
     }
 
-    const signatureText = await this.unsafe_createInboxSignatureText();
+    const { signatureText, signatureRequestId } =
+      await this.unsafe_createInboxSignatureText();
 
-    // if the signature text is not available, the client is already registered
-    if (!signatureText) {
+    // if the signature text or request ID is not available, don't register
+    if (!signatureText || !signatureRequestId) {
       return;
     }
 
-    await this.unsafe_addSignature(
-      SignatureRequestType.CreateInbox,
-      signatureText,
-      this.#signer,
-    );
+    const signature = await this.#signer.signMessage(signatureText);
+    const signer = await toSafeSigner(this.#signer, signature);
 
-    return this.sendMessage("registerIdentity", undefined);
+    return this.sendMessage("client.registerIdentity", {
+      signer,
+      signatureRequestId,
+    });
   }
 
   /**
@@ -412,39 +410,43 @@ export class Client extends ClientWorkerClass {
    *
    * @param newAccountSigner - The signer for the new account
    * @param allowInboxReassign - Whether to allow inbox reassignment
-   * @throws {AccountAlreadyAssociatedError} if the account is already associated with an inbox ID
-   * @throws {GenerateSignatureError} if the signature cannot be generated
    * @throws {SignerUnavailableError} if no signer is available
+   * @throws {InboxReassignError} if `allowInboxReassign` is false
+   * @throws {AccountAlreadyAssociatedError} if the account is already associated with an inbox ID
    */
   async unsafe_addAccount(
     newAccountSigner: Signer,
     allowInboxReassign: boolean = false,
   ) {
+    if (!this.#signer) {
+      throw new SignerUnavailableError();
+    }
+
+    if (!allowInboxReassign) {
+      throw new InboxReassignError();
+    }
+
     // check for existing inbox id
     const existingInboxId = await this.findInboxIdByIdentifier(
       await newAccountSigner.getIdentifier(),
     );
 
-    if (existingInboxId && !allowInboxReassign) {
+    if (existingInboxId) {
       throw new AccountAlreadyAssociatedError(existingInboxId);
     }
 
-    const signatureText = await this.unsafe_addAccountSignatureText(
-      await newAccountSigner.getIdentifier(),
-      true,
-    );
-
-    if (!signatureText) {
-      throw new GenerateSignatureError(SignatureRequestType.AddWallet);
-    }
-
-    await this.unsafe_addSignature(
-      SignatureRequestType.AddWallet,
-      signatureText,
-      newAccountSigner,
-    );
-
-    await this.unsafe_applySignatures();
+    const { signatureText, signatureRequestId } =
+      await this.unsafe_addAccountSignatureText(
+        await newAccountSigner.getIdentifier(),
+        true,
+      );
+    const signature = await newAccountSigner.signMessage(signatureText);
+    const signer = await toSafeSigner(newAccountSigner, signature);
+    return this.sendMessage("client.addAccount", {
+      identifier: signer.identifier,
+      signer,
+      signatureRequestId,
+    });
   }
 
   /**
@@ -453,28 +455,23 @@ export class Client extends ClientWorkerClass {
    * Requires a signer, use `Client.create` to create a client with a signer.
    *
    * @param accountIdentifier - The identifier of the account to remove
-   * @throws {GenerateSignatureError} if the signature cannot be generated
    * @throws {SignerUnavailableError} if no signer is available
    */
-  async removeAccount(accountIdentifier: Identifier) {
+  async removeAccount(identifier: Identifier) {
     if (!this.#signer) {
       throw new SignerUnavailableError();
     }
 
-    const signatureText =
-      await this.unsafe_removeAccountSignatureText(accountIdentifier);
+    const { signatureText, signatureRequestId } =
+      await this.unsafe_removeAccountSignatureText(identifier);
+    const signature = await this.#signer.signMessage(signatureText);
+    const signer = await toSafeSigner(this.#signer, signature);
 
-    if (!signatureText) {
-      throw new GenerateSignatureError(SignatureRequestType.RevokeWallet);
-    }
-
-    await this.unsafe_addSignature(
-      SignatureRequestType.RevokeWallet,
-      signatureText,
-      this.#signer,
-    );
-
-    await this.unsafe_applySignatures();
+    return this.sendMessage("client.removeAccount", {
+      identifier,
+      signer,
+      signatureRequestId,
+    });
   }
 
   /**
@@ -482,7 +479,6 @@ export class Client extends ClientWorkerClass {
    *
    * Requires a signer, use `Client.create` to create a client with a signer.
    *
-   * @throws {GenerateSignatureError} if the signature cannot be generated
    * @throws {SignerUnavailableError} if no signer is available
    */
   async revokeAllOtherInstallations() {
@@ -490,22 +486,15 @@ export class Client extends ClientWorkerClass {
       throw new SignerUnavailableError();
     }
 
-    const signatureText =
+    const { signatureText, signatureRequestId } =
       await this.unsafe_revokeAllOtherInstallationsSignatureText();
+    const signature = await this.#signer.signMessage(signatureText);
+    const signer = await toSafeSigner(this.#signer, signature);
 
-    if (!signatureText) {
-      throw new GenerateSignatureError(
-        SignatureRequestType.RevokeInstallations,
-      );
-    }
-
-    await this.unsafe_addSignature(
-      SignatureRequestType.RevokeInstallations,
-      signatureText,
-      this.#signer,
-    );
-
-    await this.unsafe_applySignatures();
+    return this.sendMessage("client.revokeAllOtherInstallations", {
+      signer,
+      signatureRequestId,
+    });
   }
 
   /**
@@ -514,7 +503,6 @@ export class Client extends ClientWorkerClass {
    * Requires a signer, use `Client.create` to create a client with a signer.
    *
    * @param installationIds - The installation IDs to revoke
-   * @throws {GenerateSignatureError} if the signature cannot be generated
    * @throws {SignerUnavailableError} if no signer is available
    */
   async revokeInstallations(installationIds: Uint8Array[]) {
@@ -522,22 +510,49 @@ export class Client extends ClientWorkerClass {
       throw new SignerUnavailableError();
     }
 
-    const signatureText =
+    const { signatureText, signatureRequestId } =
       await this.unsafe_revokeInstallationsSignatureText(installationIds);
+    const signature = await this.#signer.signMessage(signatureText);
+    const signer = await toSafeSigner(this.#signer, signature);
 
-    if (!signatureText) {
-      throw new GenerateSignatureError(
-        SignatureRequestType.RevokeInstallations,
-      );
-    }
+    return this.sendMessage("client.revokeInstallations", {
+      installationIds,
+      signer,
+      signatureRequestId,
+    });
+  }
 
-    await this.unsafe_addSignature(
-      SignatureRequestType.RevokeInstallations,
-      signatureText,
-      this.#signer,
-    );
+  /**
+   * Revokes specific installations of the client's inbox without a client
+   *
+   * @param env - The environment to use
+   * @param signer - The signer to use
+   * @param inboxId - The inbox ID to revoke installations for
+   * @param installationIds - The installation IDs to revoke
+   */
+  static async revokeInstallations(
+    signer: Signer,
+    inboxId: string,
+    installationIds: Uint8Array[],
+    env?: XmtpEnv,
+  ) {
+    const utils = new Utils();
+    await utils.revokeInstallations(signer, inboxId, installationIds, env);
+    utils.close();
+  }
 
-    await this.unsafe_applySignatures();
+  /**
+   * Gets the inbox state for the specified inbox IDs without a client
+   *
+   * @param inboxIds - The inbox IDs to get the state for
+   * @param env - The environment to use
+   * @returns The inbox state for the specified inbox IDs
+   */
+  static async inboxStateFromInboxIds(inboxIds: string[], env?: XmtpEnv) {
+    const utils = new Utils();
+    const result = await utils.inboxStateFromInboxIds(inboxIds, env);
+    utils.close();
+    return result;
   }
 
   /**
@@ -546,7 +561,6 @@ export class Client extends ClientWorkerClass {
    * Requires a signer, use `Client.create` to create a client with a signer.
    *
    * @param identifier - The new recovery identifier
-   * @throws {GenerateSignatureError} if the signature cannot be generated
    * @throws {SignerUnavailableError} if no signer is available
    */
   async changeRecoveryIdentifier(identifier: Identifier) {
@@ -554,22 +568,16 @@ export class Client extends ClientWorkerClass {
       throw new SignerUnavailableError();
     }
 
-    const signatureText =
+    const { signatureText, signatureRequestId } =
       await this.unsafe_changeRecoveryIdentifierSignatureText(identifier);
+    const signature = await this.#signer.signMessage(signatureText);
+    const signer = await toSafeSigner(this.#signer, signature);
 
-    if (!signatureText) {
-      throw new GenerateSignatureError(
-        SignatureRequestType.ChangeRecoveryIdentifier,
-      );
-    }
-
-    await this.unsafe_addSignature(
-      SignatureRequestType.ChangeRecoveryIdentifier,
-      signatureText,
-      this.#signer,
-    );
-
-    await this.unsafe_applySignatures();
+    return this.sendMessage("client.changeRecoveryIdentifier", {
+      identifier,
+      signer,
+      signatureRequestId,
+    });
   }
 
   /**
@@ -578,7 +586,7 @@ export class Client extends ClientWorkerClass {
    * @returns Whether the client is registered
    */
   async isRegistered() {
-    return this.sendMessage("isRegistered", undefined);
+    return this.sendMessage("client.isRegistered", undefined);
   }
 
   /**
@@ -588,7 +596,7 @@ export class Client extends ClientWorkerClass {
    * @returns Whether the client can message the identifiers
    */
   async canMessage(identifiers: Identifier[]) {
-    return this.sendMessage("canMessage", { identifiers });
+    return this.sendMessage("client.canMessage", { identifiers });
   }
 
   /**
@@ -619,7 +627,7 @@ export class Client extends ClientWorkerClass {
    * @returns The inbox ID, if found
    */
   async findInboxIdByIdentifier(identifier: Identifier) {
-    return this.sendMessage("findInboxIdByIdentifier", { identifier });
+    return this.sendMessage("client.findInboxIdByIdentifier", { identifier });
   }
 
   /**
@@ -628,9 +636,9 @@ export class Client extends ClientWorkerClass {
    * @param contentType - The content type to get the codec for
    * @returns The codec, if found
    */
-  codecFor<T = unknown>(contentType: ContentTypeId) {
+  codecFor<ContentType = unknown>(contentType: ContentTypeId) {
     return this.#codecs.get(contentType.toString()) as
-      | ContentCodec<T>
+      | ContentCodec<ContentType>
       | undefined;
   }
 
@@ -642,7 +650,7 @@ export class Client extends ClientWorkerClass {
    * @returns The encoded content
    * @throws {CodecNotFoundError} if no codec is found for the content type
    */
-  encodeContent(content: unknown, contentType: ContentTypeId) {
+  encodeContent(content: ContentTypes, contentType: ContentTypeId) {
     const codec = this.codecFor(contentType);
     if (!codec) {
       throw new CodecNotFoundError(contentType);
@@ -664,8 +672,11 @@ export class Client extends ClientWorkerClass {
    * @throws {CodecNotFoundError} if no codec is found for the content type
    * @throws {InvalidGroupMembershipChangeError} if the message is an invalid group membership change
    */
-  decodeContent<T = unknown>(message: SafeMessage, contentType: ContentTypeId) {
-    const codec = this.codecFor<T>(contentType);
+  decodeContent<ContentType = unknown>(
+    message: SafeMessage,
+    contentType: ContentTypeId,
+  ) {
+    const codec = this.codecFor<ContentType>(contentType);
     if (!codec) {
       throw new CodecNotFoundError(contentType);
     }
@@ -690,7 +701,9 @@ export class Client extends ClientWorkerClass {
    * @returns The signature
    */
   signWithInstallationKey(signatureText: string) {
-    return this.sendMessage("signWithInstallationKey", { signatureText });
+    return this.sendMessage("client.signWithInstallationKey", {
+      signatureText,
+    });
   }
 
   /**
@@ -704,7 +717,7 @@ export class Client extends ClientWorkerClass {
     signatureText: string,
     signatureBytes: Uint8Array,
   ) {
-    return this.sendMessage("verifySignedWithInstallationKey", {
+    return this.sendMessage("client.verifySignedWithInstallationKey", {
       signatureText,
       signatureBytes,
     });
@@ -723,7 +736,7 @@ export class Client extends ClientWorkerClass {
     signatureBytes: Uint8Array,
     publicKey: Uint8Array,
   ) {
-    return this.sendMessage("verifySignedWithPublicKey", {
+    return this.sendMessage("client.verifySignedWithPublicKey", {
       signatureText,
       signatureBytes,
       publicKey,
@@ -737,7 +750,7 @@ export class Client extends ClientWorkerClass {
    * @returns The key package statuses
    */
   async getKeyPackageStatusesForInstallationIds(installationIds: string[]) {
-    return this.sendMessage("getKeyPackageStatusesForInstallationIds", {
+    return this.sendMessage("client.getKeyPackageStatusesForInstallationIds", {
       installationIds,
     });
   }
