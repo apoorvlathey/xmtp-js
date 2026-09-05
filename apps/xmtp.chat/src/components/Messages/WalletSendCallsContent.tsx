@@ -7,8 +7,14 @@ import {
 import type { WalletSendCallsParams } from "@xmtp/content-type-wallet-send-calls";
 import { useCallback } from "react";
 import { useOutletContext } from "react-router";
-import { useChainId, useSendTransaction, useSwitchChain } from "wagmi";
+import {
+  useAccount,
+  useChainId,
+  useSendTransaction,
+  useSwitchChain,
+} from "wagmi";
 import type { ContentTypes } from "@/contexts/XMTPContext";
+import type { TransactionReferenceMessage } from "@/types";
 
 export type WalletSendCallsContentProps = {
   content: WalletSendCallsParams;
@@ -25,6 +31,7 @@ export const WalletSendCallsContent: React.FC<WalletSendCallsContentProps> = ({
   const { sendTransactionAsync } = useSendTransaction();
   const { switchChainAsync } = useSwitchChain();
   const wagmiChainId = useChainId();
+  const { address } = useAccount();
 
   const handleSubmit = useCallback(async () => {
     const chainId = parseInt(content.chainId, 16);
@@ -47,9 +54,18 @@ export const WalletSendCallsContent: React.FC<WalletSendCallsContentProps> = ({
           console.error(error);
         },
       });
-      const transactionReference: TransactionReference = {
-        networkId: content.chainId,
-        reference: txHash,
+      const transactionReference: TransactionReferenceMessage = {
+        content: {
+          transactionReference: {
+            networkId: content.chainId,
+            reference: txHash,
+            metadata: {
+              transactionType: "wallet_send_calls",
+              fromAddress:
+                address || "0x0000000000000000000000000000000000000000", // Current user's address
+            },
+          },
+        },
       };
       const conversation =
         await client.conversations.getConversationById(conversationId);
@@ -58,7 +74,7 @@ export const WalletSendCallsContent: React.FC<WalletSendCallsContentProps> = ({
         return;
       }
       await conversation.send(
-        transactionReference,
+        transactionReference as unknown as TransactionReference,
         ContentTypeTransactionReference,
       );
     }
